@@ -1,0 +1,29 @@
+# In-cluster controller. For development run it on the laptop instead:
+#   cao controller --interval 300            (uses ~/.kube/config)
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: cao-controller, namespace: cao}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: cao-controller}
+  template:
+    metadata:
+      labels: {app: cao-controller}
+    spec:
+      serviceAccountName: cao-controller
+      containers:
+        - name: controller
+          image: cao/controller:dev
+          imagePullPolicy: IfNotPresent
+          args: ["controller", "--interval", "300", "--checkpoints-dir", "/checkpoints"]
+          env:
+            - {name: CAO_DB, value: /data/cao.sqlite}
+          volumeMounts:
+            - {name: checkpoints, mountPath: /checkpoints}
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: checkpoints
+          hostPath: {path: /checkpoints, type: DirectoryOrCreate}
+        - name: data
+          emptyDir: {}

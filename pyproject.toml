@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "carbon-aware-orchestrator"
+version = "0.1.0"
+description = "Migration-cost-aware carbon scheduler for Kubernetes (research prototype)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+  "pandas",
+  "scikit-learn",
+  "pulp",
+  "psutil",
+  "requests",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+forecast = ["xgboost"]
+k8s = ["kubernetes"]
+carbon = ["entsoe-py"]
+dashboard = ["streamlit", "fastapi", "uvicorn", "matplotlib"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+cao = "cao.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cao*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning:pulp.*"]
+
+[tool.ruff]
+line-length = 100

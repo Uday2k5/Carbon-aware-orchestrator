@@ -1,0 +1,67 @@
+# Logical regions. Each k3d agent node carries topology.carbon-aware.io/region=<key>.
+# The laptop is fed by ONE grid; regions are emulated with real CI traces of other grids
+# while workload energy and migration cost are measured locally.
+regions:
+  india:
+    display: "India (Western grid)"
+    grid: "IN-WE"
+    source: electricity-maps      # no free official API; fallback: synthetic
+    capacity_cpu: 8
+  sweden:
+    display: "Sweden (SE3)"
+    grid: "SE_3"
+    source: entsoe
+    capacity_cpu: 8
+  france:
+    display: "France"
+    grid: "FR"
+    source: entsoe
+    capacity_cpu: 8
+  us-east:
+    display: "US East (PJM)"
+    grid: "PJM"
+    source: eia
+    capacity_cpu: 8
+  uk:
+    display: "Great Britain"
+    grid: "GB"
+    source: uk                    # api.carbonintensity.org.uk, no key
+    capacity_cpu: 8
+
+# Round-trip latency (ms) from user region (row) to compute region (column).
+# Illustrative public-internet figures; replace with measured RTTs if available.
+latency_ms:
+  india:   {india: 20,  sweden: 150, france: 130, us-east: 220, uk: 125}
+  sweden:  {india: 150, sweden: 10,  france: 35,  us-east: 110, uk: 30}
+  france:  {india: 130, sweden: 35,  france: 10,  us-east: 90,  uk: 15}
+  us-east: {india: 220, sweden: 110, france: 90,  us-east: 10,  uk: 80}
+  uk:      {india: 125, sweden: 30,  france: 15,  us-east: 80,  uk: 10}
+
+# Power model of the testbed machine: P = idle + (max - idle) * cpu_utilisation.
+# PLACEHOLDER. Calibrate with a wall-plug meter or Linux RAPL before reporting numbers.
+power_model:
+  idle_watts: 10.0
+  max_watts: 45.0
+
+network:
+  # Electricity intensity of data transfer. 0.06 kWh/GB = Aslan et al. (2018) 2015 estimate
+  # (includes access network, conservative). Core-network-only figures are ~10x lower.
+  # Run experiments/exp04_network_energy_sensitivity.py before trusting any single value.
+  energy_kwh_per_gb: 0.06
+  ci_attribution: mean           # mean | src | dst  -> which grid's CI applies to transfer energy
+
+migration_model:
+  # E_phase(S) = a*S + b  (Joules, S in GB). PLACEHOLDERS until `cao profile` + `cao fit`.
+  checkpoint: {a: 60.0, b: 5.0}
+  transfer:   {a: 120.0, b: 8.0}
+  restore:    {a: 50.0, b: 4.0}
+  downtime_base_s: 3.0
+  downtime_per_gb_s: 4.0
+
+scheduler:
+  slot_hours: 1.0
+  horizon_slots: 24
+  evaluation_horizon_h: 24       # "remaining runtime" assumed for always-on web services
+  margin_g: 0.0                  # required net saving before MOVE (hysteresis)
+  deadline_penalty_g: 10000.0        # per unmet slot; >> any per-slot carbon (<= ~250 g)
+  milp_time_limit_s: 20
