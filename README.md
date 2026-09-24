@@ -55,7 +55,60 @@ python experiments/exp01_payback_boundary.py       # THE experiment (MOVE/REFUSE
 python experiments/exp02_policy_comparison.py      # 6 baselines vs proposed vs oracle (MILP: minutes)
 python experiments/exp03_forecast_sensitivity.py   # regret vs forecast error
 python experiments/exp04_network_energy_sensitivity.py
+python experiments/exp05_replay.py                 # visual replay: results/replay.html + replay.gif
 ```
+
+## Visual replay (for demos / viva)
+
+```bash
+cao simulate --hours 72 --jobs 16 --export results/replay.json
+cao replay results/replay.json --html results/replay.html --gif results/replay.gif [--mp4 results/replay.mp4] [--policy greenest-region]
+```
+
+- `replay.html` is self-contained (data embedded, no server, no install): open it in any browser.
+  Hour slider / play, policy switch, region columns coloured by live CI, jobs as dots that jump on
+  MOVE (arrow), hollow while WAITing, red ring on REFUSE, progress ring, cumulative-carbon race of
+  every policy, decision log, payback-boundary heatmap. Space / ← / → keys work. "load JSON" opens
+  any other export.
+- `replay.gif` (Pillow) / `replay.mp4` (needs ffmpeg) is the same scene rendered with matplotlib
+  for slides. `--hours 72 --fps 4` gives an 18 s clip; `--policy` picks which policy to animate.
+
+### Try it in 3 minutes
+
+```bash
+source .venv/bin/activate                      # Windows: .venv\Scripts\activate
+pip install -e ".[dev,viz]"                    # matplotlib + pillow for the GIF
+python experiments/exp05_replay.py             # ~1 min: simulates 72 h x 16 jobs, all policies, writes results/replay.*
+open results/replay.html                       # macOS;  Windows: start results\replay.html;  Linux: xdg-open results/replay.html
+```
+
+What you should see in the browser (no server, works offline, fonts fall back to system if no internet):
+
+1. Header shows `hour 0 / 71 · 2026-01-01 00:00 UTC`, policy dropdown preselects `migration-aware-milp`.
+2. Five region columns (india, sweden, france, us-east, uk) tinted green→red by their current CI, value printed under each name.
+3. Coloured dots = jobs (orange ML, violet batch, green web). Dot size grows with state GB; white ring fills as the job progresses; dashed hollow dots are waiting.
+4. Press **▶ play** (or space): dots jump between columns on **MOVE** with a cyan arrow, get a yellow ring on **WAIT**, a red ring on **REFUSE**. `←`/`→` step one hour, the slider scrubs.
+5. Right rail: KPI tiles (total / execution / migration g, migrations, refused moves, wait slots, jobs done) and the cumulative-carbon race of every policy; the selected policy is the thick line.
+6. Bottom left: decision log (newest first) with saved g, migration g and payback hours per event. Bottom right: payback-boundary table, MOVE cells green, REFUSE cells red.
+7. Switch the dropdown to `greenest-region`: many more arrows, no REFUSE, higher migration g. Switch to `carbon-unaware`: nothing ever moves.
+8. Hover any dot for its job card and last decision reason. `load JSON` opens any other `cao simulate --export` file.
+
+Open `results/replay.gif` in any image viewer / drop it into PowerPoint; it is the same scene for one policy.
+
+Regenerate for other settings:
+
+```bash
+cao simulate --hours 168 --jobs 20 --seed 3 --export results/replay.json           # or --data data/processed/ci_all.csv
+cao replay results/replay.json --html results/replay.html                           # page only
+cao replay results/replay.json --gif results/replay.gif --policy greenest-region --fps 6 --hours 48
+cao replay results/replay.json --mp4 results/replay.mp4                             # needs ffmpeg on PATH
+pytest tests/test_replay.py                                                         # export / html / gif smoke tests
+```
+
+Troubleshooting: blank page → the browser blocked the inline script from `file://`? It should not, but
+serving the folder works too: `python -m http.server 8765 --directory results` then
+http://localhost:8765/replay.html. Dots overlap → fewer jobs (`--jobs 10`). GIF too big for slides →
+`--hours 48 --fps 3 --dpi 80`.
 
 Until `cao profile` + `cao fit` have run, the cost model uses the **placeholder** constants in
 `config/regions.yaml` (labelled `source: placeholder` in every output). Never report those.
@@ -107,11 +160,12 @@ cao/
   simulator/   traces + jobs + 6 policies + oracle, accounting, metrics
   k8s/         client (real + fake), controller, cooperative migrate
   dashboard/   FastAPI api, Streamlit app
+  replay/      simulation replay: JSON export, self-contained HTML page, matplotlib GIF/MP4
   db/          sqlite store
   cli.py       `cao ...`
 config/        regions.yaml (regions, latency, power model, placeholders), migration_model.json (fitted)
 deploy/        k3d script, workload containers, k8s manifests, controller RBAC
-experiments/   exp01..exp04
+experiments/   exp01..exp05 (exp05 = visual replay)
 tests/         pytest
 docs/          research framing, architecture, math, install, week plan, schema
 ```

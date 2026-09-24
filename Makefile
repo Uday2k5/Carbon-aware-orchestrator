@@ -1,4 +1,4 @@
-.PHONY: install test smoke exp01 exp02 exp03 exp04 profile fit synth cluster lint
+.PHONY: install test smoke exp01 exp02 exp03 exp04 exp05 replay profile fit synth cluster lint
 PY ?= .venv/bin/python
 install:
 	python3 -m venv .venv && .venv/bin/pip install -U pip && .venv/bin/pip install -e ".[dev]"
@@ -20,6 +20,8 @@ exp03:
 	$(PY) experiments/exp03_forecast_sensitivity.py
 exp04:
 	$(PY) experiments/exp04_network_energy_sensitivity.py
+exp05 replay:
+	$(PY) experiments/exp05_replay.py
 cluster:
 	bash deploy/k3d/create-cluster.sh carbon
 lint:

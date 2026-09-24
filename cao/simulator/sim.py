@@ -39,6 +39,7 @@ class SimResult:
     mean_completion_h: float
     jobs: List[Job] = field(default_factory=list, repr=False)
     decisions: List[dict] = field(default_factory=list, repr=False)
+    timeline: List[dict] = field(default_factory=list, repr=False)   # one snapshot per slot
 
     def to_row(self) -> dict:
         return {
@@ -67,6 +68,7 @@ def run_simulation(
     margin_g: float = 0.0,
     log_decisions: bool = False,
     resume_cost: bool = True,
+    record_timeline: bool = False,
 ) -> SimResult:
     traces = {r: np.asarray(list(v), dtype=float) for r, v in traces.items()}
     regions = list(traces)
@@ -82,13 +84,19 @@ def run_simulation(
     counts = {a: 0 for a in ActionType}
     migrations = sla_slots = cap_rej = 0
     log: List[dict] = []
+    timeline: List[dict] = []
+    if record_timeline:
+        log_decisions = True
     load: Dict[str, float] = {r: 0.0 for r in regions}
 
     for t in range(T):
         now_h = t * slot_h
         ci_now = {r: float(traces[r][t]) for r in regions}
         active = [j for j in jobs if not j.done and j.release_h <= now_h + 1e-9]
+        applied_actions: Dict[str, str] = {}
         if not active:
+            if record_timeline:
+                timeline.append(_snapshot(t, now_h, jobs, applied_actions, exec_g, mig_g, res_g, migrations))
             continue
         ctx = SimContext(
             t=t, now_h=now_h, slot_h=slot_h, regions=regions, ci_now=ci_now,
@@ -102,6 +110,7 @@ def run_simulation(
         for j in active:
             d = decisions.get(j.job_id) or Decision(j.job_id, ActionType.HOLD, target_region=j.region)
             was_running = j.running
+            region_before = j.region
             action = d.action
 
             if action == ActionType.WAIT and (j.is_always_on or (j.running and not j.preemptible)):
@@ -137,9 +146,11 @@ def run_simulation(
                 res_g += rc
 
             counts[action] += 1
+            applied_actions[j.job_id] = action.value
             if log_decisions:
                 row = d.to_dict()
-                row.update({"t": t, "applied": action.value, "region_after": j.region})
+                row.update({"t": t, "applied": action.value, "region_before": region_before,
+                            "region_after": j.region})
                 log.append(row)
 
         # execute the slot
@@ -164,6 +175,8 @@ def run_simulation(
                 j.done = True
                 j.running = False
                 j.completed_at_h = now_h + eff
+        if record_timeline:
+            timeline.append(_snapshot(t, now_h, jobs, applied_actions, exec_g, mig_g, res_g, migrations))
 
     deadline_viol = unfinished = 0
     completions = []
@@ -188,8 +201,30 @@ def run_simulation(
         deadline_violations=deadline_viol, unfinished=unfinished,
         sla_violation_slots=sla_slots, capacity_rejections=cap_rej,
         mean_completion_h=float(np.mean(completions)) if completions else float("nan"),
-        jobs=jobs, decisions=log,
+        jobs=jobs, decisions=log, timeline=timeline,
     )
+
+
+def _snapshot(t, now_h, jobs, applied_actions, exec_g, mig_g, res_g, migrations) -> dict:
+    snap_jobs = {}
+    for j in jobs:
+        if j.done:
+            status = "done"
+        elif j.release_h > now_h + 1e-9:
+            status = "not-released"
+        elif j.running:
+            status = "running"
+        elif j.started:
+            status = "suspended"
+        else:
+            status = "pending"
+        snap_jobs[j.job_id] = {
+            "region": j.region, "status": status, "action": applied_actions.get(j.job_id),
+            "progress": round(min(1.0, j.progress_h / j.duration_h), 3) if j.duration_h > 0 else 1.0,
+        }
+    return {"t": t, "jobs": snap_jobs,
+            "cum": {"exec_g": round(exec_g, 2), "migration_g": round(mig_g, 2), "resume_g": round(res_g, 3),
+                    "total_g": round(exec_g + mig_g + res_g, 2), "migrations": migrations}}
 
 
 def compare_policies(

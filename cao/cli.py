@@ -7,7 +7,8 @@
   cao payback       --state-gb 60 --power-kw 0.2 --ci-src 650 --ci-dst 50 --remaining-h 0.5
   cao boundary      --power-kw 0.2 --ci-src 650 --ci-dst 50 [--sizes ...]
   cao forecast      --data data/processed/ci.csv --region uk [--model gbr]
-  cao simulate      --data data/processed/ci.csv --jobs 20 --seed 1 [--no-milp]
+  cao simulate      --data data/processed/ci.csv --jobs 20 --seed 1 [--no-milp] [--export results/replay.json]
+  cao replay        results/replay.json --html results/replay.html --gif results/replay.gif [--mp4 ...] [--policy X]
   cao controller    [--dry-run] [--fake] [--interval 300] [--mode heuristic|milp]
 """
 from __future__ import annotations
@@ -169,13 +170,36 @@ def cmd_simulate(args):
             p_.replan_every = args.replan_every
     fc = NoisyForecast(traces, sigma_rel=args.forecast_sigma, seed=args.seed)
     res = compare_policies(traces, jobs, pols, cm, latency_ms=s.latency_ms, capacity=s.capacity_cpu,
-                           forecast=fc, horizon_slots=int(s.scheduler.get("horizon_slots", 24)))
+                           forecast=fc, horizon_slots=int(s.scheduler.get("horizon_slots", 24)),
+                           record_timeline=bool(args.export))
     with pd.option_context("display.width", 200, "display.max_columns", 30):
         print(res.to_string(index=False))
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         res.to_csv(args.out, index=False)
         print(f"-> {args.out}")
+    if args.export:
+        from .replay.export import export_replay
+        stamps = to_traces(df, hours=args.hours).get("__index__") if args.data else None
+        path = export_replay(args.export, traces, jobs, res.attrs["results"], cm, timestamps=stamps)
+        print(f"replay -> {path}   (cao replay {path} --html ... --gif ...)")
+
+
+# ----------------------------------------------------------------------------- replay
+def cmd_replay(args):
+    from .replay.export import load_replay
+    from .replay.html import render_html
+    rep = load_replay(args.replay)
+    if not (args.html or args.gif or args.mp4):
+        sys.exit("nothing to do: pass --html and/or --gif / --mp4")
+    if args.html:
+        print(f"html -> {render_html(rep, args.html)}   (open in any browser; no server needed)")
+    if args.gif or args.mp4:
+        from .replay.animate import render_animation
+        out = render_animation(rep, args.policy, args.gif, args.mp4, fps=args.fps, dpi=args.dpi, hours=args.hours)
+        for k, v in out.items():
+            if v:
+                print(f"{k} -> {v}")
 
 
 # ------------------------------------------------------------------------- controller
@@ -260,7 +284,14 @@ def build_parser() -> argparse.ArgumentParser:
     a = sp.add_parser("simulate"); a.add_argument("--data"); a.add_argument("--regions", nargs="*"); a.add_argument("--hours", type=int, default=24 * 3)
     a.add_argument("--jobs", type=int, default=20); a.add_argument("--seed", type=int, default=1); a.add_argument("--forecast-sigma", type=float, default=0.1)
     a.add_argument("--no-milp", action="store_true"); a.add_argument("--no-oracle", action="store_true"); a.add_argument("--out")
-    a.add_argument("--replan-every", type=int, default=1, help="MILP re-solve interval in slots"); a.set_defaults(func=cmd_simulate)
+    a.add_argument("--replan-every", type=int, default=1, help="MILP re-solve interval in slots")
+    a.add_argument("--export", help="write replay JSON for `cao replay`"); a.set_defaults(func=cmd_simulate)
+
+    a = sp.add_parser("replay", help="render a replay JSON as HTML page and/or GIF/MP4 animation")
+    a.add_argument("replay"); a.add_argument("--html"); a.add_argument("--gif"); a.add_argument("--mp4")
+    a.add_argument("--policy", help="policy to animate (default: migration-aware-milp)"); a.add_argument("--fps", type=int, default=4)
+    a.add_argument("--dpi", type=int, default=100); a.add_argument("--hours", type=int, help="animate only the first N hours")
+    a.set_defaults(func=cmd_replay)
 
     a = sp.add_parser("controller"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--fake", action="store_true")
     a.add_argument("--interval", type=float, default=300.0); a.add_argument("--ticks", type=int); a.add_argument("--mode", default="heuristic", choices=["heuristic", "milp"])

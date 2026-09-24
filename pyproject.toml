@@ -23,6 +23,7 @@ forecast = ["xgboost"]
 k8s = ["kubernetes"]
 carbon = ["entsoe-py"]
 dashboard = ["streamlit", "fastapi", "uvicorn", "matplotlib"]
+viz = ["matplotlib", "pillow"]
 dev = ["pytest", "ruff"]
 
 [project.scripts]
@@ -30,6 +31,9 @@ cao = "cao.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["cao*"]
+
+[tool.setuptools.package-data]
+"cao.replay" = ["template.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

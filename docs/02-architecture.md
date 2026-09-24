@@ -14,6 +14,7 @@
 | Controller | `cao/k8s` | managed pods + node labels | nodeSelector patches, telemetry |
 | Store | `cao/db` | everything above | sqlite |
 | Dashboard | `cao/dashboard` | sqlite + results csv | charts |
+| Replay | `cao/replay` | simulator timeline (`record_timeline=True`) | replay.json → self-contained HTML page, GIF/MP4 |
 
 ## Data flow (one controller tick)
 
@@ -58,3 +59,13 @@ and modelled as `bytes × kWh/GB` in the cost model. State this clearly in the r
 One laptop, one real grid. Each k3d agent is a *logical* region whose CI trace is replayed
 from real data (ENTSO-E / EIA / UK ESO / Electricity Maps). Workload energy and migration
 cost are measured locally; carbon = measured kWh × replayed CI.
+
+## Replay export (`cao/replay/export.py`)
+
+`run_simulation(..., record_timeline=True)` stores one snapshot per hour (status, region, applied
+action, progress of every job, cumulative carbon). `build_replay()` packs all policies of a
+`compare_policies()` run into one JSON (status codes 0 not-released / 1 pending / 2 running /
+3 suspended / 4 done; actions M/W/H/R; regions as indices) plus the CI traces, job table,
+MOVE/WAIT/REFUSE events and a payback-boundary grid for the two most extreme regions.
+`render_html()` embeds that JSON into `template.html`; `render_animation()` draws the same scene
+with matplotlib.
