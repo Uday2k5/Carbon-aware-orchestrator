@@ -7,6 +7,9 @@ Research prototype (reduced scope). One question:
 Everything in this repo exists to answer that with *measured* numbers on a real Kubernetes
 testbed, then to evaluate a scheduler that only moves a workload when the answer is "yes".
 
+New here? Read the [PRD](docs/00-prd.md) (problem, goals, scope, requirements, milestones, team),
+then follow **For teammates** below.
+
 ```
             ENTSO-E / EIA / UK ESO / Electricity Maps
                           │  hourly gCO2e/kWh per region
@@ -36,6 +39,77 @@ testbed, then to evaluate a scheduler that only moves a workload when the answer
 | `REFUSE` | a greener region exists **but** migration carbon ≥ carbon saved (payback not met) |
 
 `REFUSE` vs `HOLD` is the whole research story: baseline "greenest region" never refuses.
+
+## For teammates: clone, run, test (≈10 minutes)
+
+Needs only Git and Python 3.10–3.14 (3.14 is what the repo was built with). No Docker, no
+Kubernetes, no API keys for this part. Ask Uday to add your GitHub username as a collaborator
+first (repo is private).
+
+**macOS / Linux / WSL2**
+
+```bash
+git clone https://github.com/Uday2k5/Carbon-aware-orchestrator.git
+cd Carbon-aware-orchestrator
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev,viz]"
+pytest
+python experiments/exp01_payback_boundary.py
+python experiments/exp05_replay.py
+open results/replay.html            # Linux: xdg-open results/replay.html
+```
+
+**Windows 11 (PowerShell)**
+
+```powershell
+git clone https://github.com/Uday2k5/Carbon-aware-orchestrator.git
+cd Carbon-aware-orchestrator
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev,viz]"
+pytest
+python experiments\exp01_payback_boundary.py
+python experiments\exp05_replay.py
+start results\replay.html
+```
+
+If PowerShell refuses to activate (`running scripts is disabled`), run once:
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use cmd.exe with `.venv\Scripts\activate.bat`.
+
+**What "it works" looks like**
+
+| step | expected |
+| --- | --- |
+| `pip install -e ".[dev,viz]"` | ends with `Successfully installed ... carbon-aware-orchestrator-0.1.0` |
+| `pytest` | `44 passed` in roughly a minute (CBC solver runs inside the tests) |
+| `python experiments/exp01_payback_boundary.py` | `Job A ... -> MOVE`, `Job B ... -> REFUSE`, a payback table, a `M`/`R` grid, first line says `cost model: placeholder` |
+| `python experiments/exp05_replay.py` | a 7-row policy table, then `replay json -> ... replay html -> ... replay gif -> ...` (≈1 min) |
+| `results/replay.html` in a browser | header `hour 0 / 71`, five coloured region columns, dots; press ▶ play and dots move (checklist in *Try it in 3 minutes*) |
+| `cao payback --state-gb 60 --power-kw 0.2 --ci-src 650 --ci-dst 50 --remaining-h 0.5` | `decision : REFUSE` |
+
+**Common problems**
+
+| symptom | fix |
+| --- | --- |
+| `cao: command not found` / `'cao' is not recognized` | venv not activated. Activate it, or run `python -m cao.cli ...` |
+| pip tries to compile numpy/pandas for ages or fails | Python version without wheels. Install 3.12 or 3.13 from python.org (tick *Add to PATH*), delete `.venv`, redo |
+| `ModuleNotFoundError: matplotlib` | `pip install -e ".[viz]"` |
+| `pulp` says the CBC solver was not found | `pip install --force-reinstall pulp` (PuLP bundles CBC for Windows, macOS, Linux x86-64). On ARM Linux: `sudo apt install coinor-cbc` |
+| `ssl` / certificate errors on macOS python.org build | run `/Applications/Python 3.x/Install Certificates.command` |
+| tests slow (> 3 min) | normal on a busy laptop; run `pytest -q tests/test_payback.py` to check quickly |
+| replay page blank | open it via a server instead: `python -m http.server 8765 --directory results` → http://localhost:8765/replay.html |
+| no internet | everything above still works (synthetic data, fonts fall back) |
+
+**How to contribute**
+
+1. `git checkout -b feature/<short-name>` from an up-to-date `main`.
+2. Put code in the module you own (see *Team split*); tests in `tests/`; notebooks in `notebooks/`.
+3. `pytest` must be green; `ruff check cao tests` clean.
+4. Push the branch, open a PR into `main`, one teammate reviews.
+5. Never commit `data/processed/*`, `results/*`, `.env`, or any key file (all git-ignored, but check `git status` before `git add -A`).
+
+Real-data work (member 2) and the cluster (member 1) start in [docs/04-day1-install.md](docs/04-day1-install.md).
 
 ## Quickstart (any OS, no cluster, no API keys)
 
@@ -182,6 +256,7 @@ Shared contract: `cao.core.models.Job` / `Decision`, `MigrationCostModel`, the C
 
 ## Docs
 
+- [docs/00-prd.md](docs/00-prd.md) — product requirements: problem, goals, scope, functional requirements with status, metrics, milestones, risks
 - [docs/01-research-framing.md](docs/01-research-framing.md) — gap, hypotheses, novelty table, baselines, mandatory papers
 - [docs/02-architecture.md](docs/02-architecture.md) — components, data flow, migration sequence
 - [docs/03-math-model.md](docs/03-math-model.md) — payback period, cost model, MILP
