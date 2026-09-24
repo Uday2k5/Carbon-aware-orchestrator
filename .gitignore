@@ -16,3 +16,9 @@ results/*
 .env
 .ipynb_checkpoints/
 .claude/
+
+# never commit key material
+keyfile*
+id_ed25519*
+id_rsa*
+*.pem
