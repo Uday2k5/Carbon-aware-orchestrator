@@ -9,6 +9,8 @@
   cao forecast      --data data/processed/ci.csv --region uk [--model gbr]
   cao simulate      --data data/processed/ci.csv --jobs 20 --seed 1 [--no-milp] [--export results/replay.json]
   cao replay        results/replay.json --html results/replay.html --gif results/replay.gif [--mp4 ...] [--policy X]
+  cao live tick     [--site site]          # real grid data -> forecast -> decisions -> dashboard json
+  cao live serve    [--site site] [--port 8080]
   cao controller    [--dry-run] [--fake] [--interval 300] [--mode heuristic|milp]
 """
 from __future__ import annotations
@@ -202,6 +204,27 @@ def cmd_replay(args):
                 print(f"{k} -> {v}")
 
 
+# ------------------------------------------------------------------------------- live
+def cmd_live_tick(args):
+    from .live.pipeline import tick
+    out = tick(args.site, args.live_config)
+    print(f"tick @ {out['now']}  ({out['seconds']} s)")
+    for lid, st in out["status"].items():
+        print(f"  {lid:<16} {st}" + (f"   {out['errors'][lid]}" if lid in out["errors"] else ""))
+    print(f"  hours processed: {out['hours_processed']}   new decisions: {out['new_decisions']}")
+    print("  cumulative gCO2e: " + "  ".join(f"{k}={v:,.0f}" for k, v in out["totals"].items()))
+    print(f"  dashboard: {out['site']}/index.html   (cao live serve --site {out['site']})")
+
+
+def cmd_live_serve(args):
+    import functools
+    import http.server
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=args.site)
+    with http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler) as srv:
+        print(f"serving {args.site} at http://localhost:{args.port}  (Ctrl+C to stop)")
+        srv.serve_forever()
+
+
 # ------------------------------------------------------------------------- controller
 def cmd_controller(args):
     from .decision.engine import DecisionEngine
@@ -292,6 +315,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--policy", help="policy to animate (default: migration-aware-milp)"); a.add_argument("--fps", type=int, default=4)
     a.add_argument("--dpi", type=int, default=100); a.add_argument("--hours", type=int, help="animate only the first N hours")
     a.set_defaults(func=cmd_replay)
+
+    lv = sp.add_parser("live", help="live demo: real grid data -> forecast -> decisions -> dashboard").add_subparsers(dest="sub", required=True)
+    a = lv.add_parser("tick", help="fetch live data, advance the twin, write site/data/live.json")
+    a.add_argument("--site", default="site"); a.add_argument("--live-config"); a.set_defaults(func=cmd_live_tick)
+    a = lv.add_parser("serve", help="serve the dashboard locally")
+    a.add_argument("--site", default="site"); a.add_argument("--port", type=int, default=8080); a.set_defaults(func=cmd_live_serve)
 
     a = sp.add_parser("controller"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--fake", action="store_true")
     a.add_argument("--interval", type=float, default=300.0); a.add_argument("--ticks", type=int); a.add_argument("--mode", default="heuristic", choices=["heuristic", "milp"])

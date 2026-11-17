@@ -40,6 +40,51 @@ then follow **For teammates** below.
 
 `REFUSE` vs `HOLD` is the whole research story: baseline "greenest region" never refuses.
 
+## Live demo: real grid data, real decisions, hosted dashboard
+
+`cao live tick` is the whole journey in one command, and a GitHub Action runs it every hour:
+
+1. **Collect** live carbon intensity for six locations: North West England, London, South Wales
+   (National Grid ESO), Denmark West (Energinet), France (RTE), India North (Electricity Maps, needs a key).
+2. **Forecast** the next 24 h per grid. Candidates (boosted trees, seasonal, persistence, blend) are
+   re-scored every day on the last two weeks, out of sample; the best one serves today's forecast.
+3. **Schedule** a rolling set of simulated jobs with the real engine: MOVE / WAIT / HOLD / REFUSE.
+4. **Score** four policies on the same jobs: ours, ours with the 24 h MILP plan, always-greenest, carbon-unaware.
+5. **Publish** `site/data/live.json` plus the dashboard in `web/` (grid cards, forecast vs actual,
+   job placement, decision feed, scoreboard, payback calculator, what-is-real list).
+
+Grid data, forecasts and decisions are real. The jobs are simulated and the migration cost constants
+are placeholders until the profiler runs on the testbed; the dashboard says so in its Method section.
+
+**Run it on any machine (macOS, Linux, Windows)**
+
+```bash
+cao live tick          # first run ~2-3 min (60 days of history, model training, 72 h replay); later runs ~15 s
+cao live serve         # then open http://localhost:8080
+```
+
+On Windows use the same two commands in PowerShell after the *For teammates* setup. Work on any
+machine, `git push`; on the other machine `git pull`. The hosted dashboard updates itself from `main`.
+
+**Host it for free on GitHub Pages**
+
+1. Repo -> Settings -> General -> Change visibility -> Public (free Pages needs a public repo; GitHub Pro allows private).
+2. `git push`. The *Live dashboard* workflow runs and creates the `gh-pages` branch (Actions tab shows it).
+3. Repo -> Settings -> Pages -> Source: *Deploy from a branch* -> `gh-pages` / `(root)` -> Save.
+4. Open https://uday2k5.github.io/Carbon-aware-orchestrator/ . It refreshes every hour (GitHub may delay
+   scheduled runs by a few minutes). Actions tab -> *Live dashboard* -> *Run workflow* forces a run.
+
+**Switch India on**
+
+Create a free key at https://www.electricitymaps.com/ (zone `IN-NO`), then:
+
+- hosted: Repo -> Settings -> Secrets and variables -> Actions -> New repository secret, name `ELECTRICITY_MAPS_TOKEN`.
+- local: put `ELECTRICITY_MAPS_TOKEN=...` in a `.env` file in the repo root (git-ignored).
+
+India appears on the next run and starts collecting; its forecast switches on after ten days of history.
+
+Settings live in `config/live.yaml` (locations, latency table, services, job arrival rate).
+
 ## For teammates: clone, run, test (≈10 minutes)
 
 Needs only Git and Python 3.10–3.14 (3.14 is what the repo was built with). No Docker, no
@@ -82,7 +127,7 @@ If PowerShell refuses to activate (`running scripts is disabled`), run once:
 | step | expected |
 | --- | --- |
 | `pip install -e ".[dev,viz]"` | ends with `Successfully installed ... carbon-aware-orchestrator-0.1.0` |
-| `pytest` | `44 passed` in roughly a minute (CBC solver runs inside the tests) |
+| `pytest` | `47 passed` in roughly a minute (CBC solver runs inside the tests) |
 | `python experiments/exp01_payback_boundary.py` | `Job A ... -> MOVE`, `Job B ... -> REFUSE`, a payback table, a `M`/`R` grid, first line says `cost model: placeholder` |
 | `python experiments/exp05_replay.py` | a 7-row policy table, then `replay json -> ... replay html -> ... replay gif -> ...` (≈1 min) |
 | `results/replay.html` in a browser | header `hour 0 / 71`, five coloured region columns, dots; press ▶ play and dots move (checklist in *Try it in 3 minutes*) |
@@ -235,9 +280,11 @@ cao/
   k8s/         client (real + fake), controller, cooperative migrate
   dashboard/   FastAPI api, Streamlit app
   replay/      simulation replay: JSON export, self-contained HTML page, matplotlib GIF/MP4
+  live/        live pipeline: grid feeds, hourly store, forecasting, scheduling twin, dashboard JSON
   db/          sqlite store
   cli.py       `cao ...`
 config/        regions.yaml (regions, latency, power model, placeholders), migration_model.json (fitted)
+web/           live dashboard (static: index.html, styles.css, app.js)
 deploy/        k3d script, workload containers, k8s manifests, controller RBAC
 experiments/   exp01..exp05 (exp05 = visual replay)
 tests/         pytest

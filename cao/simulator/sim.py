@@ -17,6 +17,7 @@ from ..core.models import ActionType, Decision, Job
 from ..decision.sla import rtt_ms
 from .forecast_providers import ForecastProvider, OracleForecast
 from .policies import Policy, SimContext
+from .step import step_slot
 
 
 @dataclass
@@ -106,75 +107,19 @@ def run_simulation(
         )
         decisions = policy.decide_all(ctx, active)
 
-        downtime_h: Dict[str, float] = {}
-        for j in active:
-            d = decisions.get(j.job_id) or Decision(j.job_id, ActionType.HOLD, target_region=j.region)
-            was_running = j.running
-            region_before = j.region
-            action = d.action
-
-            if action == ActionType.WAIT and (j.is_always_on or (j.running and not j.preemptible)):
-                action = ActionType.HOLD
-            if action == ActionType.MOVE and (not d.target_region or d.target_region == j.region):
-                action = ActionType.HOLD
-
-            if action == ActionType.MOVE:
-                tgt = d.target_region
-                if capacity is not None and load.get(tgt, 0.0) + j.cpu > capacity.get(tgt, float("inf")) + 1e-9:
-                    cap_rej += 1
-                    action = ActionType.HOLD
-                else:
-                    mc = cost_model.carbon_g(j.state_gb, ci_now[j.region], ci_now[tgt])
-                    j.migration_carbon_g += mc.total_g
-                    mig_g += mc.total_g
-                    migrations += 1
-                    j.migrations += 1
-                    downtime_h[j.job_id] = mc.downtime_s / 3600.0
-                    j.region = tgt
-                    j.running = True
-                    j.started = True
-
-            if action == ActionType.WAIT:
-                j.running = False
-            elif action in (ActionType.HOLD, ActionType.REFUSE):
-                j.running = True
-                j.started = True
-
-            if resume_cost and j.running and not was_running and action != ActionType.MOVE:
-                rc = cost_model.resume_carbon_g(j.state_gb, ci_now[j.region])
-                j.migration_carbon_g += rc
-                res_g += rc
-
-            counts[action] += 1
-            applied_actions[j.job_id] = action.value
-            if log_decisions:
-                row = d.to_dict()
-                row.update({"t": t, "applied": action.value, "region_before": region_before,
-                            "region_after": j.region})
-                log.append(row)
-
-        # execute the slot
-        load = {r: 0.0 for r in regions}
-        for j in active:
-            if not j.running:
-                continue
-            eff = max(0.0, slot_h - downtime_h.get(j.job_id, 0.0))
-            eff = min(eff, j.remaining_h)
-            if eff <= 0 and not j.is_always_on:
-                continue
-            e_kwh = j.power_kw * eff
-            c = e_kwh * ci_now[j.region]
-            j.exec_carbon_g += c
-            exec_g += c
-            j.progress_h += eff
-            load[j.region] += j.cpu
-            if j.sla_rtt_ms is not None and j.user_region is not None and latency_ms is not None:
-                if rtt_ms(latency_ms, j.user_region, j.region) > j.sla_rtt_ms:
-                    sla_slots += 1
-            if j.remaining_h <= 1e-9:
-                j.done = True
-                j.running = False
-                j.completed_at_h = now_h + eff
+        out = step_slot(active, decisions, ci_now, cost_model, regions, latency_ms, capacity, load,
+                        slot_h, now_h, t, resume_cost, log_decisions)
+        exec_g += out.exec_g
+        mig_g += out.mig_g
+        res_g += out.res_g
+        migrations += out.migrations
+        sla_slots += out.sla_slots
+        cap_rej += out.cap_rej
+        for act, n in out.counts.items():
+            counts[act] += n
+        applied_actions = out.applied
+        log.extend(out.log)
+        load = out.load
         if record_timeline:
             timeline.append(_snapshot(t, now_h, jobs, applied_actions, exec_g, mig_g, res_g, migrations))
 

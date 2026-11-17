@@ -64,7 +64,9 @@ class GradientBoostingForecaster(Forecaster):
         params: Optional[Dict] = None,
         holdout_frac: float = 0.2,
         random_state: int = 0,
+        target: str = "level",
     ):
+        self.target = target          # "level": predict CI(t+h);  "delta": predict CI(t+h) - CI(t)
         self.backend = backend
         self.max_horizon = max_horizon
         self.lags = tuple(lags)
@@ -94,11 +96,15 @@ class GradientBoostingForecaster(Forecaster):
     def fit(self, history):
         s = history if isinstance(history, pd.Series) else pd.Series(np.asarray(history, float))
         X, y = make_supervised(s, range(1, self.max_horizon + 1), self.lags)
+        if self.target == "delta":
+            y = y - X["ci"].values
         # chronological holdout for residual spread per horizon (uncertainty estimate)
         n_hold = int(len(X) * self.holdout_frac)
         if n_hold >= self.max_horizon * 2:
             cut = len(s) - int(len(s) * self.holdout_frac)
             X_tr, y_tr = make_supervised(s.iloc[:cut], range(1, self.max_horizon + 1), self.lags)
+            if self.target == "delta":
+                y_tr = y_tr - X_tr["ci"].values
             m = self._make_model().fit(X_tr, y_tr)
             for h in range(1, self.max_horizon + 1):
                 mask = X["h"].values == h
@@ -118,13 +124,15 @@ class GradientBoostingForecaster(Forecaster):
         horizon = min(horizon, self.max_horizon)
         rows = pd.concat([last] * horizon, ignore_index=True)
         rows["h"] = np.arange(1, horizon + 1)
-        pred = self.model.predict(rows)
-        return np.maximum(np.asarray(pred, dtype=float), 1.0)
+        pred = np.asarray(self.model.predict(rows), dtype=float)
+        if self.target == "delta":
+            pred = pred + float(last["ci"].iloc[0])
+        return np.maximum(pred, 0.0)
 
     def predict_interval(self, history, horizon=24, z=1.28):
         p = self.predict(history, horizon)
         sd = np.array([self.residual_std.get(h, 0.0) for h in range(1, len(p) + 1)])
-        return np.maximum(p - z * sd, 1.0), p, p + z * sd
+        return np.maximum(p - z * sd, 0.0), p, p + z * sd
 
 
 def make_forecaster(name: str, **kw) -> Forecaster:

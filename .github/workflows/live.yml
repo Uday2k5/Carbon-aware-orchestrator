@@ -1,0 +1,48 @@
+# Hourly: fetch live grid data, advance the scheduler, publish the dashboard to GitHub Pages.
+# One-time setup: Settings -> Pages -> Deploy from a branch -> gh-pages / (root).
+# Optional secret ELECTRICITY_MAPS_TOKEN (Settings -> Secrets and variables -> Actions) switches India on.
+name: Live dashboard
+
+on:
+  schedule:
+    - cron: "12 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["cao/**", "web/**", "config/**", "pyproject.toml", ".github/workflows/live.yml"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: live-dashboard
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e .
+      - name: Restore published site (its data folder is the database)
+        run: |
+          REMOTE="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git clone --depth 1 --branch gh-pages "$REMOTE" site || mkdir site
+          rm -rf site/.git
+      - name: Tick
+        env:
+          ELECTRICITY_MAPS_TOKEN: ${{ secrets.ELECTRICITY_MAPS_TOKEN }}
+        run: cao live tick --site site
+      - name: Publish (single-commit branch, no history growth)
+        run: |
+          cd site
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name="live-dashboard" -c user.email="actions@users.noreply.github.com" commit -q -m "live: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gh-pages

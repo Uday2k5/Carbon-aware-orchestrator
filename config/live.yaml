@@ -1,0 +1,50 @@
+# Live demo: real grid carbon intensity for a handful of locations, simulated workloads,
+# real forecasts and real scheduling decisions. Used by `cao live tick`.
+site:
+  title: "Carbon-Aware Orchestrator"
+  repo_url: "https://github.com/Uday2k5/Carbon-aware-orchestrator"
+backfill_days: 60          # history pulled on first run (forecaster training data)
+warm_start_hours: 72       # twin replays this much recorded history on first run
+capacity_cpu: 16
+arrival_rate: 0.7          # mean new batch/ML jobs per hour (Poisson)
+max_active_jobs: 14
+
+locations:
+  - {id: north-west-england, name: "North West England", country: GB, source: gb-regional, region_id: 3,
+     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/"}
+  - {id: london, name: "London", country: GB, source: gb-regional, region_id: 13,
+     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/"}
+  - {id: south-wales, name: "South Wales", country: GB, source: gb-regional, region_id: 7,
+     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/"}
+  - {id: denmark-west, name: "Denmark West", country: DK, source: energidata, area: DK1,
+     operator: "Energinet", url: "https://www.energidataservice.dk/tso-electricity/CO2Emis"}
+  - {id: france, name: "France", country: FR, source: rte-eco2mix,
+     operator: "RTE éCO2mix", url: "https://www.rte-france.com/eco2mix"}
+  - {id: india-north, name: "India North", country: IN, source: electricity-maps, zone: IN-NO,
+     operator: "Electricity Maps", url: "https://app.electricitymaps.com/zone/IN-NO",
+     needs_key: ELECTRICITY_MAPS_TOKEN}
+
+# Illustrative round-trip times (ms) between locations; same location = latency_same.
+latency_same: 5
+latency_pairs:
+  - [london, south-wales, 8]
+  - [london, north-west-england, 10]
+  - [south-wales, north-west-england, 10]
+  - [london, france, 12]
+  - [london, denmark-west, 25]
+  - [south-wales, france, 18]
+  - [south-wales, denmark-west, 30]
+  - [north-west-england, france, 20]
+  - [north-west-england, denmark-west, 30]
+  - [france, denmark-west, 28]
+  - [india-north, london, 130]
+  - [india-north, south-wales, 136]
+  - [india-north, north-west-england, 134]
+  - [india-north, france, 128]
+  - [india-north, denmark-west, 140]
+
+# Always-on web services (created when their user location has live data).
+services:
+  - {id: web-uk, user: london, sla_ms: 15, power_kw: 0.08, state_gb: 0.2}
+  - {id: web-eu, user: denmark-west, sla_ms: 35, power_kw: 0.08, state_gb: 0.3}
+  - {id: web-in, user: india-north, sla_ms: 60, power_kw: 0.08, state_gb: 0.2}
