@@ -73,3 +73,28 @@ def test_tick_end_to_end_and_resume(small_cfg, tmp_path):
         assert vals == sorted(vals)                                   # cumulative carbon never decreases
     assert all(later["totals"][k] >= first_totals[k] for k in first_totals)
     assert (site / ".nojekyll").exists() and (site / "data" / "ci_hourly.csv").exists()
+
+
+def test_empty_feed_is_reported_as_no_data(small_cfg, tmp_path):
+    def empty_france(loc, start, end, session):
+        if loc["id"] == "france":
+            return pd.DataFrame({"timestamp": pd.to_datetime([], utc=True), "ci": []})
+        return fake_source(loc, start, end, session)
+    out = tick(tmp_path / "site", now="2026-11-17T12:20:00Z", config_path=small_cfg, forward={}, web_dir=tmp_path / "noweb",
+               sources={k: empty_france for k in ("gb-regional", "energidata", "rte-eco2mix", "electricity-maps")}, log=lambda *_: None)
+    assert out["status"]["france"] == "no-data" and out["rows"]["france"] == 0
+    assert out["status"]["london"] == "live" and out["rows"]["london"] > 100
+    live = json.loads((tmp_path / "site" / "data" / "live.json").read_text())
+    milp = next(p for p in live["twin"]["policies"] if p["id"] == "ours-milp")
+    assert milp["solver_fallbacks"] == 0                      # the optimiser really ran
+
+
+def test_state_version_bump_rebuilds_twin(small_cfg, tmp_path):
+    site = tmp_path / "site"
+    kw = dict(config_path=small_cfg, sources={k: fake_source for k in ("gb-regional", "energidata", "rte-eco2mix", "electricity-maps")},
+              forward={}, web_dir=tmp_path / "noweb", log=lambda *_: None)
+    tick(site, now="2026-11-17T12:20:00Z", **kw)
+    st = site / "data" / "state.json"
+    old = json.loads(st.read_text()); old["version"] = 1; st.write_text(json.dumps(old))
+    out = tick(site, now="2026-11-17T13:20:00Z", **kw)
+    assert out["hours_processed"] == 6                         # rebuilt from recorded data, not continued

@@ -137,6 +137,7 @@ class MilpPolicy(Policy):
         self.time_limit_s = time_limit_s
         self.replan_every = max(1, replan_every)
         self.solve_times: List[float] = []
+        self.fallbacks = 0     # times the solver could not run and the greedy engine answered instead
         self._plan = None      # (t_solved, MilpResult, job_ids)
 
     def decide_all(self, ctx, jobs):
@@ -149,9 +150,11 @@ class MilpPolicy(Policy):
                 return self._from_plan(res, off, jobs, ctx)
         out = eng.decide(jobs, self._fc(ctx), ctx.now_h, mode="milp")
         res = eng.last_milp
-        if getattr(res, "solve_time_s", None) is not None:
+        if getattr(res, "solve_time_s", None) is not None and getattr(res, "ok", False):
             self.solve_times.append(res.solve_time_s)
             self._plan = (ctx.t, res, ids)
+        else:
+            self.fallbacks += 1
         return out
 
     @staticmethod

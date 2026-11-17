@@ -21,7 +21,6 @@ import requests
 UTC = timezone.utc
 GB = "https://api.carbonintensity.org.uk"
 DK = "https://api.energidataservice.dk/dataset/CO2Emis"
-FR = "https://odre.opendatasoft.com/api/explore/v2.1/catalog/datasets/eco2mix-national-tr/exports/json"
 EM = "https://api.electricitymap.org/v3/carbon-intensity"
 JSON_HDR = {"Accept": "application/json", "User-Agent": "carbon-aware-orchestrator-live/0.1"}
 
@@ -77,11 +76,40 @@ def fetch_energidata(loc: dict, start: datetime, end: datetime, session: request
     return _frame([(r["Minutes5UTC"] + "Z", r["CO2Emission"]) for r in recs])
 
 
+FR_HOSTS = ("https://odre.opendatasoft.com", "https://opendata.reseaux-energies.fr")
+FR_PATH = "/api/explore/v2.1/catalog/datasets/eco2mix-national-tr"
+
+
 def fetch_rte(loc: dict, start: datetime, end: datetime, session: requests.Session) -> pd.DataFrame:
-    params = {"select": "date_heure,taux_co2", "order_by": "date_heure",
-              "where": f"date_heure >= date'{start:%Y-%m-%dT%H:%M:%SZ}' and taux_co2 is not null"}
-    data = _get(session, FR, params=params, timeout=120).json()
-    return _frame([(d["date_heure"], d["taux_co2"]) for d in data])
+    """Bulk export first (either host); if that yields nothing, page through the records API newest-first."""
+    where = f"date_heure >= date'{start:%Y-%m-%dT%H:%M:%SZ}' and taux_co2 is not null"
+    rows: list = []
+    for host in FR_HOSTS:
+        try:
+            data = _get(session, host + FR_PATH + "/exports/json", timeout=120,
+                        params={"select": "date_heure,taux_co2", "order_by": "date_heure", "where": where}).json()
+            rows = [(d["date_heure"], d["taux_co2"]) for d in data if isinstance(d, dict) and d.get("taux_co2") is not None]
+        except Exception:
+            rows = []
+        if rows:
+            return _frame(rows)
+    last_err = None
+    for host in FR_HOSTS:
+        try:
+            for offset in range(0, 6000, 100):
+                res = _get(session, host + FR_PATH + "/records",
+                           params={"select": "date_heure,taux_co2", "where": where, "order_by": "date_heure desc",
+                                   "limit": 100, "offset": offset}).json().get("results", [])
+                rows += [(d["date_heure"], d["taux_co2"]) for d in res if d.get("taux_co2") is not None]
+                if len(res) < 100:
+                    break
+        except Exception as exc:
+            last_err = exc
+        if rows:
+            return _frame(rows)
+    if last_err is not None:
+        raise last_err
+    return _frame(rows)
 
 
 def fetch_electricity_maps(loc: dict, start: datetime, end: datetime, session: requests.Session) -> pd.DataFrame:

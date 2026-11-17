@@ -26,7 +26,7 @@ POLICIES = [
 ]
 FEED_POLICY = "ours"
 COUNTERS = ("exec_g", "mig_g", "res_g", "migrations", "moves", "waits", "refuses", "holds", "done",
-            "deadline_missed", "sla_slots", "cap_rej")
+            "deadline_missed", "sla_slots", "cap_rej", "solver_fallbacks")
 ISO = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -131,10 +131,12 @@ class LiveTwin:
                 ctx = SimContext(t=0, now_h=now_h, slot_h=1.0, regions=list(enabled), ci_now=ci_now,
                                  forecast=DictForecast(forecasts), cost_model=self.cm, latency_ms=self.cfg.latency_ms,
                                  capacity=cap, load=dict(P["load"]), horizon_slots=24, evaluation_horizon_h=24.0)
+                policy = make()
                 try:
-                    decisions = make().decide_all(ctx, active)
+                    decisions = policy.decide_all(ctx, active)
                 except Exception:
                     decisions = {}
+                P["solver_fallbacks"] += getattr(policy, "fallbacks", 0)
                 out = step_slot(active, decisions, ci_now, self.cm, list(ci_now), self.cfg.latency_ms, cap, P["load"],
                                 1.0, now_h, 0, True, log_decisions=(pid == FEED_POLICY))
                 P["exec_g"] += out.exec_g
@@ -202,7 +204,8 @@ class LiveTwin:
             pols.append({"id": pid, "label": label, "total_g": round(self.total(pid), 1), "exec_g": round(P["exec_g"], 1),
                          "migration_g": round(P["mig_g"] + P["res_g"], 1), "migrations": P["migrations"], "refuses": P["refuses"],
                          "waits": P["waits"], "done": P["done"], "deadline_missed": P["deadline_missed"],
-                         "sla_violation_hours": P["sla_slots"], "active": len(P["jobs"])})
+                         "sla_violation_hours": P["sla_slots"], "active": len(P["jobs"]),
+                         "solver_fallbacks": P["solver_fallbacks"]})
         jobs = []
         for j in self.pol[FEED_POLICY]["jobs"]:
             status = "running" if j.running else ("suspended" if j.started else "pending")

@@ -12,7 +12,7 @@ dependencies = [
   "numpy",
   "pandas",
   "scikit-learn",
-  "pulp",
+  "pulp>=3.3,<4",
   "psutil",
   "requests",
   "pyyaml",

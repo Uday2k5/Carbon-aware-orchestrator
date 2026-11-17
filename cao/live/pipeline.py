@@ -26,6 +26,7 @@ from .twin import ISO, LiveTwin
 
 ROOT = Path(__file__).resolve().parents[2]
 H1 = pd.Timedelta(hours=1)
+STATE_VERSION = 2          # bump when twin logic changes; the hosted twin then rebuilds from recorded data
 DEC_COLS = ["ts", "job", "kind", "state_gb", "action", "from", "to", "saved_g", "migration_g", "payback_h",
             "remaining_h", "resume_at", "reason"]
 
@@ -60,7 +61,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     # ------------------------------------------------------------ 1. collect
     wide = store.load_ci()
     latest = store.load_json("latest.json", {}) or {}
-    status, errors = {}, {}
+    status, errors, rows = {}, {}, {}
     for loc in cfg.locations:
         lid = loc["id"]
         try:
@@ -78,7 +79,8 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
                 step = native["timestamp"].diff().median() if len(native) > 2 else pd.Timedelta(0)
                 valid_until = min(native["timestamp"].iloc[-1] + (step if pd.notna(step) else pd.Timedelta(0)), now)
                 latest[lid] = {"ts": _iso(valid_until), "ci": round(float(native["ci"].iloc[-1]), 1)}
-            status[lid] = "live"
+            rows[lid] = int(len(native))
+            status[lid] = "live" if len(native) else "no-data"
         except MissingKey:
             status[lid] = "awaiting-key"
         except Exception as exc:  # keep the tick alive; show the location as stale
@@ -130,6 +132,9 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
 
     # ------------------------------------------------------------ 3. twin
     state = store.load_json("state.json")
+    if state is not None and state.get("version") != STATE_VERSION:
+        state = None
+        (store.dir / "decisions.csv").unlink(missing_ok=True)
     if state is None:
         epoch = max(last_complete - (cfg.warm_start_hours - 1) * H1, wide.dropna(how="all").index.min() + 240 * H1)
         epoch = min(epoch, last_complete)
@@ -152,7 +157,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     if len(pending) > 6:                                          # after a replay, refresh the display model
         models = fit_models(filled, last_complete)
     preds = predict(models, filled, last_complete, selection, bands)
-    store.save_json("state.json", twin.to_state())
+    store.save_json("state.json", dict(twin.to_state(), version=STATE_VERSION))
     store.append_rows("decisions.csv", [[r[c] for c in DEC_COLS] for r in feed], DEC_COLS)
 
     # ------------------------------------------------------------ 4. official forward forecasts (where published)
@@ -230,5 +235,5 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     if web.exists():
         shutil.copytree(web, site, dirs_exist_ok=True)
     (site / ".nojekyll").write_text("")
-    return {"now": _iso(now), "status": status, "errors": errors, "hours_processed": len(pending), "new_decisions": len(feed),
+    return {"now": _iso(now), "status": status, "errors": errors, "rows": rows, "hours_processed": len(pending), "new_decisions": len(feed),
             "totals": {p["id"]: p["total_g"] for p in tw["policies"]}, "site": str(site), "seconds": live["meta"]["build_seconds"]}

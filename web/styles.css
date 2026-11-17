@@ -132,6 +132,7 @@ h1 em{font-style:normal;color:var(--brand)}
 .tbl th:first-child,.tbl td:first-child{text-align:left;white-space:normal}
 .tbl td{font-family:var(--mono)}.tbl td:first-child{font-family:var(--sans);font-weight:500}
 .tbl i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px}
+.tbl .warn{color:var(--wait);font-weight:400;font-size:12px}
 
 .calc{display:grid;gap:14px;align-content:start}
 .calc label{display:grid;gap:6px;font-size:13.5px;font-weight:500}

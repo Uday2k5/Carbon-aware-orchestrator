@@ -210,7 +210,7 @@ def cmd_live_tick(args):
     out = tick(args.site, args.live_config)
     print(f"tick @ {out['now']}  ({out['seconds']} s)")
     for lid, st in out["status"].items():
-        print(f"  {lid:<16} {st}" + (f"   {out['errors'][lid]}" if lid in out["errors"] else ""))
+        print(f"  {lid:<20} {st:<13} {out['rows'].get(lid, 0):>6} readings fetched" + (f"   {out['errors'][lid]}" if lid in out["errors"] else ""))
     print(f"  hours processed: {out['hours_processed']}   new decisions: {out['new_decisions']}")
     print("  cumulative gCO2e: " + "  ".join(f"{k}={v:,.0f}" for k, v in out["totals"].items()))
     print(f"  dashboard: {out['site']}/index.html   (cao live serve --site {out['site']})")

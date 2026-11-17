@@ -238,7 +238,7 @@ function renderScore() {
     g.restore(); } };
   mk("score-chart", { type: "line", data: { labels, datasets: ds }, options: base, plugins: [ends] });
   const head = `<tr><th>policy</th><th>total CO₂e</th><th>from running</th><th>from moving</th><th>moves made</th><th>moves refused</th><th>hours waited</th><th>jobs finished</th><th>finished late</th></tr>`;
-  $("#score-table").innerHTML = head + TABLE_ORDER.map((id) => { const p = pol(id); return p ? `<tr><td><i style="background:var(${POLICY_SLOT[id]})"></i>${esc(p.label)}</td><td>${fmtG(p.total_g)}</td><td>${fmtG(p.exec_g)}</td><td>${fmtG(p.migration_g)}</td><td>${p.migrations}</td><td>${p.refuses}</td><td>${p.waits}</td><td>${p.done}</td><td>${p.deadline_missed}</td></tr>` : ""; }).join("");
+  $("#score-table").innerHTML = head + TABLE_ORDER.map((id) => { const p = pol(id); return p ? `<tr><td><i style="background:var(${POLICY_SLOT[id]})"></i>${esc(p.label)}${p.solver_fallbacks ? ` <span class="warn" title="The optimiser could not run for ${p.solver_fallbacks} hours; the greedy rule decided instead">· solver fell back ${p.solver_fallbacks}×</span>` : ""}</td><td>${fmtG(p.total_g)}</td><td>${fmtG(p.exec_g)}</td><td>${fmtG(p.migration_g)}</td><td>${p.migrations}</td><td>${p.refuses}</td><td>${p.waits}</td><td>${p.done}</td><td>${p.deadline_missed}</td></tr>` : ""; }).join("");
   $("#score-sub").textContent = `Cumulative emissions of the same ${tw.jobs_created} jobs under each policy, since ${fmtT(tw.epoch)} UTC.`;
   $("#score-note").textContent = `Running = electricity used by the jobs. Moving = checkpoint, transfer and restore. Late = finished after its deadline. The first ${LIVE.meta.notes.replayed_hours} hours were replayed from recorded grid data when the dashboard launched.`;
 }
