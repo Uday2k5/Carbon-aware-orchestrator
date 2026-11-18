@@ -110,7 +110,8 @@ draw and swings a lot, so quote the study rather than the gap.
 - Weather comes from 3–4 points per grid, not a full wind-farm map.
 - The forecast-value figures depend on the placeholder migration cost constants and on the
   simulated job mix.
-- India joins as a naive forecast first and gets the trained model after four weeks of collected data.
+- India North has no trained model. Its only available feed (Electricity Maps) returns estimated
+  values, not measurements, so it gets a naive forecast and is excluded from every accuracy figure here.
 
 ## Likely questions
 

@@ -93,6 +93,10 @@ function unusual(id) {
   const a = ((LIVE.anomalies || {}).latest || {})[id];
   return a && a.unusual ? `<span class="flag ${a.z < 0 ? "cleaner" : ""}" title="${num(a.actual)} against ${num(a.expected)} expected three hours earlier">UNUSUAL</span>` : "";
 }
+function estText(l) {
+  const e = l.estimated || {};
+  return `${e.provider || l.operator} could not measure this grid for these hours and filled them in with its own estimate${e.method ? ` (${e.method.replace(/_/g, " ").toLowerCase()})` : ""}. ${num(e.estimated_pct)}% of the last day is estimated.`;
+}
 function renderCards() {
   $("#locs").innerHTML = LIVE.locations.map((l) => {
     if (!l.history) {
@@ -101,7 +105,7 @@ function renderCards() {
     }
     const s = l.stats7d || {}, st = l.status === "live" ? `${ago(l.updated_at)} ago` : l.status;
     return `<button class="loc" type="button" data-id="${l.id}" aria-pressed="${l.id === selected}">
-      <div class="loc-top"><span class="loc-name">${esc(l.name)}${unusual(l.id)}</span><span class="cc">${esc(l.country)}</span></div>
+      <div class="loc-top"><span class="loc-name">${esc(l.name)}${unusual(l.id)}${l.estimated ? `<span class="flag est" title="${esc(estText(l))}">ESTIMATE</span>` : ""}</span><span class="cc">${esc(l.country)}</span></div>
       <div class="loc-ci"><span class="num">${num(l.ci_now)}</span><span class="unit">gCO₂/kWh</span><i class="swatch" style="background:${ciColor(l.ci_now)}"></i></div>
       ${spark(l)}
       <div class="loc-foot"><span title="lowest and highest in the last 7 days">7d ${num(s.min)}–${num(s.max)}</span><span class="st ${esc(l.status)}" title="age of the latest reading">${esc(st)}</span></div>
@@ -143,9 +147,9 @@ function renderForecast() {
   base.scales.y.title = { display: true, text: "gCO₂ per kWh" };
   const nowLine = { id: "now", afterDatasetsDraw(c) { const x = c.scales.x.getPixelForValue(n - 1), a = c.chartArea, g = c.ctx; g.save(); g.strokeStyle = css("--muted"); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(x, a.top); g.lineTo(x, a.bottom); g.stroke(); g.setLineDash([]); g.fillStyle = css("--muted"); g.font = `11px ${css("--mono")}`; g.textAlign = "right"; g.fillText("now", x - 6, a.top + 12); g.restore(); } };
   mk("fc-chart", { type: "line", data: { labels, datasets: ds }, options: base, plugins: [nowLine] });
-  $("#fc-sub").textContent = `${l.name} · ${l.operator} · last 72 hours and the next 24.`;
+  $("#fc-sub").textContent = `${l.name} · ${l.operator} · last 72 hours and the next 24.${l.estimated ? " Values for this grid are the provider's estimates, not measurements." : ""}`;
   const hasBand = fc.length && fc[0][1] != null;
-  $("#fc-legend").innerHTML = `<span><i style="background:var(--ink-2)"></i>measured</span><span><i style="background:var(--s1)"></i>our forecast (${esc(modelName(l.forecast_model))})</span>` +
+  $("#fc-legend").innerHTML = `<span><i style="background:var(--ink-2)"></i>${l.estimated ? "provider's estimate" : "measured"}</span><span><i style="background:var(--s1)"></i>our forecast (${esc(modelName(l.forecast_model))})</span>` +
     (hasBand ? `<span><i style="background:${alpha(s1, 0.3)};height:10px"></i>80% band from recent errors</span>` : "") +
     (off.size ? `<span><i class="dash" style="color:var(--s2)"></i>operator's own forecast</span>` : "");
   renderWhy(l); renderAccuracy(l); renderModel(l);
@@ -153,6 +157,7 @@ function renderForecast() {
 
 function renderWhy(l) {
   const box = $("#why"), eff = l.weather_effect, wx = l.weather || [], fc = l.forecast || [];
+  if (l.estimated) { box.innerHTML = `<p>${esc(estText(l))} No model is trained on estimated values, so the forecast here is "${esc(modelName(l.forecast_model))}".</p>`; return; }
   if (!eff || !wx.length || !fc.length) { box.innerHTML = l.forecast_model && l.forecast_model !== "weather-trees" ? `<p>This grid has too little history for the trained model yet, so the forecast is "${esc(modelName(l.forecast_model))}".</p>` : ""; return; }
   let k = 0; eff.forEach((v, i) => { if (Math.abs(v) > Math.abs(eff[k])) k = i; });
   const fut = wx.slice(24), windNow = (wx[23] || [])[1], windThen = (fut[k] || [])[1], when = fmtT(fc[k][0]);
@@ -172,6 +177,7 @@ const modelName = (m) => ({ "weather-trees": "weather-driven trees", trees: "boo
 function renderAccuracy(l) {
   const a = acc(l.id), box = $("#acc");
   ["acc-chart", "hz-chart"].forEach((id) => { if (charts[id]) { charts[id].destroy(); delete charts[id]; } });
+  if (l.estimated) { box.innerHTML = `<h3>Forecast accuracy</h3><p class="note">Not scored for ${esc(l.name)}. Its values are estimates that follow a typical daily pattern, so a forecast would look accurate without having learned anything about the real grid. The accuracy figures on this page cover measured grids only.</p>`; return; }
   if (!a) { box.innerHTML = `<h3>Forecast accuracy</h3><p class="note">Needs four weeks of history for ${esc(l.name)} before the trained model can be scored. ${l.hours_of_history || 0} hours collected so far.</p>`; return; }
   const tiles = [["our model", a.mae_ours], ["same as now", a.mae_persistence], ["same hour yesterday", a.mae_seasonal]];
   const best = Math.min(...tiles.map((t) => t[1])), d = a.last_day;
@@ -245,6 +251,10 @@ function renderModel(l) {
   const f = (LIVE.models || {}).forecaster, c = card(l.id), a = acc(l.id), left = $("#model-card"), right = $("#model-side");
   if (!f) { left.innerHTML = right.innerHTML = ""; return; }
   $("#model-sub").textContent = `Trained by this project and retrained on every run. Last trained ${fmtT(f.retrained)} UTC. Showing ${l.name}.`;
+  if (l.estimated) {
+    left.innerHTML = `<h3>${esc(f.name)}</h3><p class="note">No model is trained for ${esc(l.name)}: its carbon values are the provider's estimates, not measurements. Its forecast is a naive one. Pick another grid to see a trained model.</p>`;
+    right.innerHTML = valueBlock(); return;
+  }
   if (!c) {
     left.innerHTML = `<h3>${esc(f.name)}</h3><p class="note">${esc(l.name)} does not have four weeks of history yet, so no model is trained for it. Until then its forecast is a naive one. Pick another grid to see a trained model.</p>`;
     right.innerHTML = valueBlock(); return;
@@ -363,6 +373,7 @@ function renderFeed() {
 }
 
 /* ------------------------------------------------------------------ scoreboard */
+function estGrids() { return LIVE.locations.filter((l) => l.estimated).map((l) => l.name); }
 function renderScore() {
   const tw = LIVE.twin, colIdx = Object.fromEntries(tw.series_columns.map((c, i) => [c, i + 1]));
   const labels = tw.series.map((r) => fmtT(r[0]));
@@ -383,7 +394,7 @@ function renderScore() {
   const head = `<tr><th>policy</th><th>total CO₂e</th><th>from running</th><th>from moving</th><th>moves made</th><th>moves refused</th><th>hours waited</th><th>job-hours run</th><th>jobs finished</th><th>finished late</th></tr>`;
   $("#score-table").innerHTML = head + TABLE_ORDER.map((id) => { const p = pol(id); return p ? `<tr><td><i style="background:var(${POLICY_SLOT[id]})"></i>${esc(p.label)}${p.solver_fallbacks ? ` <span class="warn" title="The optimiser could not run for ${p.solver_fallbacks} hours; the greedy rule decided instead">· solver fell back ${p.solver_fallbacks}×</span>` : ""}</td><td>${fmtG(p.total_g)}</td><td>${fmtG(p.exec_g)}</td><td>${fmtG(p.migration_g)}</td><td>${p.migrations}</td><td>${p.refuses}</td><td>${p.waits}</td><td>${num(p.job_hours)}</td><td>${p.done}</td><td>${p.deadline_missed}</td></tr>` : ""; }).join("");
   $("#score-sub").textContent = `Cumulative emissions of the same ${tw.jobs_created} jobs under each policy, since ${fmtT(tw.epoch)} UTC.`;
-  $("#score-note").textContent = `"Naive forecast" is our same rule fed "same as now" instead of the trained model, so the gap between those two lines is the model's contribution. Running = electricity used by the jobs. Moving = checkpoint, transfer and restore. Late = finished after its deadline. The first ${LIVE.meta.notes.replayed_hours} hours were replayed from recorded grid data when the dashboard launched.`;
+  $("#score-note").textContent = `"Naive forecast" is our same rule fed "same as now" instead of the trained model, so the gap between those two lines is the model's contribution. Running = electricity used by the jobs. Moving = checkpoint, transfer and restore. Late = finished after its deadline. The first ${LIVE.meta.notes.replayed_hours} hours were replayed from recorded grid data when the dashboard launched.${estGrids().length ? ` ${estGrids().join(", ")}: carbon values are provider estimates, not measurements; jobs placed there are charged at those estimates.` : ""}`;
 }
 
 /* ------------------------------------------------------------------ payback calculator */
@@ -420,7 +431,7 @@ function calc() {
 /* ------------------------------------------------------------------ method */
 function renderAbout() {
   const n = LIVE.meta.notes, seen = new Set(), real = [];
-  LIVE.locations.forEach((l) => { if (l.history && !seen.has(l.operator)) { seen.add(l.operator); const names = LIVE.locations.filter((x) => x.operator === l.operator && x.history).map((x) => x.name).join(", "); real.push(`Grid carbon intensity for ${esc(names)} from <a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.operator)}</a>`); } });
+  LIVE.locations.forEach((l) => { if (l.history && !seen.has(l.operator)) { seen.add(l.operator); const names = LIVE.locations.filter((x) => x.operator === l.operator && x.history).map((x) => x.name).join(", "); real.push(`Grid carbon intensity for ${esc(names)} from <a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.operator)}</a>${l.estimated ? " (the provider's estimate for each hour, not a measurement)" : ""}`); } });
   const hrs = Math.max(...withData().map((l) => l.hours_of_history || 0));
   real.push(`Weather forecasts for each grid from <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>, as issued a day ahead`);
   real.push(`The forecaster: trained here on up to ${num(hrs)} hours of that history per grid, retrained every run, scored daily on days it has not seen`);

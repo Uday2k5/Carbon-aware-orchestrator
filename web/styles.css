@@ -195,3 +195,6 @@ h3.gap{margin-top:16px}
 #event-list{max-height:820px}
 #event-side .mini-t td,#event-side .mini-t th{white-space:nowrap}
 #event-side .mini-t td:first-child{white-space:normal}
+.flag.est{background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line)}
+:root[data-theme="dark"] .flag.est{color:var(--ink-2)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .flag.est{color:var(--ink-2)}}

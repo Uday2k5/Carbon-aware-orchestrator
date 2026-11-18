@@ -87,6 +87,8 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
                 step = native["timestamp"].diff().median() if len(native) > 2 else pd.Timedelta(0)
                 valid_until = min(native["timestamp"].iloc[-1] + (step if pd.notna(step) else pd.Timedelta(0)), now)
                 latest[lid] = {"ts": _iso(valid_until), "ci": round(float(native["ci"].iloc[-1]), 1)}
+                if native.attrs.get("quality"):
+                    latest[lid]["quality"] = native.attrs["quality"]
             rows[lid] = int(len(native))
             status[lid] = "live" if len(native) else "no-data"
         except MissingKey:
@@ -108,6 +110,15 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
         raise RuntimeError("no carbon data could be fetched for any location")
 
     filled = wide.interpolate(limit=3, limit_area="inside")       # short gaps only
+    # Grids whose values the provider estimated rather than measured: shown and scheduled on, clearly labelled,
+    # but kept out of everything that trains or scores a model.
+    estimated = sorted(lid for lid, info in latest.items() if (info.get("quality") or {}).get("estimated_pct", 0) >= 50 and lid in filled.columns)
+    measured = filled.drop(columns=estimated)
+
+    def fit(upto):
+        out = fit_models(measured, weather, upto)
+        out.update({lid: None for lid in estimated})              # no model on estimated data: naive forecast only
+        return out
     recent = filled.ffill(limit=3)                                # usable as "current" for <= 3 h
     carried = filled.ffill()                                      # accounting for jobs in a stale location
 
@@ -123,7 +134,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     today = (last_complete + H1).strftime("%Y-%m-%d")
     acc = store.load_json("accuracy.json")
     if not acc or acc.get("date") != today or acc.get("version") != ACC_VERSION:
-        per, blocks = daily_backtest(filled, weather, last_complete, bt_days, bt_refit, keep_models=True)
+        per, blocks = daily_backtest(measured, weather, last_complete, bt_days, bt_refit, keep_models=True)
         snaps = store.read_rows("official_fc.csv")
         for lid, a_ in per.items():
             day = (a_.get("last_day") or {}).get("day")
@@ -139,11 +150,11 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
         try:
             day0 = (last_complete + H1).floor("D")
             span = pd.date_range(day0 - pd.Timedelta(days=bt_days), last_complete, freq="1h")
-            table = hourly_block_forecasts(filled, weather, blocks, span)       # what each past hour's model would have issued
+            table = hourly_block_forecasts(measured, weather, blocks, span)     # what each past hour's model would have issued
             past = span < last_complete                                         # the current hour is logged below as a live forecast
             backfill_log(store, span[past], {c: [x for x, k in zip(t, past) if k] for c, t in table.items()})
             study_hours = span[span < day0]
-            value = forecast_value_study(cfg, cm, filled, study_hours, {c: t[:len(study_hours)] for c, t in table.items()})
+            value = forecast_value_study(cfg, cm, measured, study_hours, {c: t[:len(study_hours)] for c, t in table.items()})
         except Exception as exc:
             log(f"  ! forecast value study: {type(exc).__name__}: {str(exc)[:140]}")
         acc = {"date": today, "version": ACC_VERSION, "per_location": per, "forecast_value": value,
@@ -165,7 +176,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
         twin = LiveTwin(cfg, cm, state)
         pending = pd.date_range(twin.last_hour + H1, last_complete, freq="1h") if twin.last_hour is not None else pd.DatetimeIndex([])
     feed, preds = [], {}
-    models = fit_models(filled, weather, (pending[0] - H1) if len(pending) else last_complete)   # trained before the hours it serves
+    models = fit((pending[0] - H1) if len(pending) else last_complete)                           # trained before the hours it serves
     for h in pending:
         en = enabled_at(h)
         if not en:
@@ -177,7 +188,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
         naive = {c: np.full(24, ci_now[c]) for c in ci_now}
         feed.extend(twin.advance(h, ci_now, fc, en, naive))
     if len(pending) > 6:                                          # after a replay, refresh the serving model
-        models = fit_models(filled, weather, last_complete)
+        models = fit(last_complete)
     preds = predict(models, filled, weather, last_complete)
     store.save_json("state.json", dict(twin.to_state(), version=STATE_VERSION))
 
@@ -189,7 +200,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     track = track_summary(scored)
     for lid, w in widen.items():
         track.setdefault(lid, {})["widen_now"] = {str(h): v for h, v in sorted(w.items())}
-    anomalies = detect(scored, weather, last_complete)
+    anomalies = detect(scored[~scored["location"].isin(estimated)] if len(scored) else scored, weather, last_complete)
     store.append_rows("decisions.csv", [[r[c] for c in DEC_COLS] for r in feed], DEC_COLS)
 
     # ------------------------------------------------------------ 5. operators' own forward forecasts (where published)
@@ -220,6 +231,8 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
         lid = loc["id"]
         entry = {k: loc.get(k) for k in ("id", "name", "country", "operator", "url")}
         entry["status"] = status.get(lid, "error")
+        if lid in estimated:
+            entry["estimated"] = latest[lid]["quality"]
         if lid in errors:
             entry["error"] = errors[lid]
         if lid in filled.columns and filled[lid].notna().any():
@@ -257,7 +270,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     live = {
         "meta": {"generated_at": _iso(now), "last_complete_hour": _iso(last_complete), "ticks": meta["ticks"],
                  "first_tick": meta["first_tick"], "title": cfg.site.get("title"), "repo_url": cfg.site.get("repo_url"),
-                 "build_seconds": None,
+                 "build_seconds": None, "estimated_grids": estimated,
                  "notes": {"workloads": "simulated", "grid_data": "live from the operators listed per location",
                            "cost_model": cm.source, "replayed_hours": cfg.warm_start_hours}},
         "locations": locations,
@@ -289,7 +302,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     if web.exists():
         shutil.copytree(web, site, dirs_exist_ok=True)
     (site / ".nojekyll").write_text("")
-    return {"now": _iso(now), "status": status, "errors": errors, "rows": rows, "hours_processed": len(pending),
+    return {"now": _iso(now), "status": status, "errors": errors, "rows": rows, "estimated": estimated, "hours_processed": len(pending),
             "new_decisions": len(feed), "totals": {p["id"]: p["total_g"] for p in tw["policies"]}, "site": str(site),
             "seconds": live["meta"]["build_seconds"], "weather": sorted(weather), "accuracy": acc.get("per_location", {}),
             "forecast_value": acc.get("forecast_value"), "anomalies": anomalies, "track": track}

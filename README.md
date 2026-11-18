@@ -91,8 +91,20 @@ everyone: ask for it as a student / academic project at https://www.electricitym
 - local: put `ELECTRICITY_MAPS_TOKEN=...` in a `.env` file in the repo root (git-ignored).
 
 India appears on the next run and starts collecting (the key only gives the last 24 hours, so its
-history builds up run by run). Forecast: "same as now" for the first two days, "same hour
-yesterday" after that, the trained weather model once four weeks have been collected.
+history builds up run by run).
+
+**India's values are estimates, and the dashboard says so.** Electricity Maps has no live measurement
+for the Indian zones; every hour comes back flagged `isEstimated` (method `TIME_SLICER_AVERAGE`, a
+typical value for that hour). The pipeline reads that flag, so an estimated grid:
+
+- is shown with an ESTIMATE tag and takes part in scheduling (jobs there are charged at the estimate);
+- gets a naive forecast only ("same as now", then "same hour yesterday" after two days);
+- is left out of model training, forecast accuracy, the uncertainty band, the anomaly detector and
+  the forecast-value study. A model scored on a typical-day estimate would look accurate without
+  having learned anything about the real grid.
+
+If the provider starts returning measured hours (under half of the last day estimated), the grid is
+treated like the others automatically.
 Check the key first: `curl -s -H "auth-token: $ELECTRICITY_MAPS_TOKEN" "https://api.electricitymap.org/v3/carbon-intensity/latest?zone=IN-NO"`.
 If the reply says it is sandbox or test data, do not switch India on: the dashboard shows real data only.
 

@@ -277,3 +277,25 @@ def test_anomaly_alarm_line_rises_on_a_heavy_tailed_grid():
     per = out["per_location"]
     assert per["london"]["limit"] == THRESHOLD and per["south-wales"]["limit"] > 2 * THRESHOLD
     assert per["south-wales"]["flagged"] <= 0.02 * per["south-wales"]["hours_checked"] + 1       # about one hour in a hundred, not one in twelve
+
+
+def test_estimated_grid_is_shown_and_scheduled_but_never_trained_or_scored(small_cfg, tmp_path):
+    def india_estimates(loc, start, end, session):               # plenty of history, but every hour is the provider's estimate
+        ts = pd.date_range(pd.Timestamp(start).floor("h"), pd.Timestamp(end), freq="1h")
+        df = pd.DataFrame({"timestamp": ts, "ci": 500 + 150 * np.cos(2 * np.pi * ts.hour / 24)})
+        df.attrs["quality"] = {"estimated_pct": 100.0, "method": "TIME_SLICER_AVERAGE", "provider": "Electricity Maps"}
+        return df
+    site = tmp_path / "site"
+    srcs = {k: fake_source for k in ("gb-regional", "energidata", "rte-eco2mix")}
+    out = tick(site, now="2026-11-17T12:20:00Z", config_path=small_cfg, sources=dict(srcs, **{"electricity-maps": india_estimates}),
+               forward={}, web_dir=tmp_path / "noweb", weather_fetcher=fake_weather, log=lambda *_: None)
+    assert out["status"]["india-north"] == "live" and out["estimated"] == ["india-north"]
+    live = json.loads((site / "data" / "live.json").read_text())
+    india = next(l for l in live["locations"] if l["id"] == "india-north")
+    assert india["estimated"]["estimated_pct"] == 100.0 and india["hours_of_history"] > 24 * 30 and live["meta"]["estimated_grids"] == ["india-north"]
+    assert india["forecast_model"] == "seasonal" and all(lo is None and hi is None for _, lo, _, hi in india["forecast"])   # naive only, no band
+    assert "india-north" not in live["models"]["forecaster"]["per_location"]          # no model trained on estimates
+    assert "india-north" not in live["accuracy"]["per_location"]                      # and none scored
+    assert "india-north" not in live["anomalies"]["latest"] and "india-north" not in live["anomalies"]["per_location"]
+    assert "london" in live["accuracy"]["per_location"] and "london" in live["anomalies"]["latest"]     # measured grids unaffected
+    assert any(j.get("region") == "india-north" or j.get("home") == "india-north" for j in live["twin"]["jobs"]) or "india-north" in json.dumps(live["twin"])

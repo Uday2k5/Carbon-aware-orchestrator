@@ -118,14 +118,23 @@ def fetch_electricity_maps(loc: dict, start: datetime, end: datetime, session: r
         raise MissingKey(loc.get("needs_key", "ELECTRICITY_MAPS_TOKEN"))
     hdr = dict(JSON_HDR, **{"auth-token": token})
     hist = _get(session, f"{EM}/history", params={"zone": loc["zone"]}, headers=hdr).json().get("history", [])
-    rows = [(h["datetime"], h["carbonIntensity"]) for h in hist if h.get("carbonIntensity") is not None]
+    hist = [h for h in hist if h.get("carbonIntensity") is not None]
+    rows = [(h["datetime"], h["carbonIntensity"]) for h in hist]
     try:
         last = _get(session, f"{EM}/latest", params={"zone": loc["zone"]}, headers=hdr).json()
         if last.get("carbonIntensity") is not None:
             rows.append((last["datetime"], last["carbonIntensity"]))
+            hist.append(last)
     except Exception:
         pass
-    return _frame(rows)
+    df = _frame(rows)
+    # The provider marks hours it could not measure and filled in by a method of its own.  Pass that on:
+    # the dashboard must say so, and no model is trained or scored on estimated values.
+    est = [h for h in hist if h.get("isEstimated")]
+    if hist:
+        methods = sorted({str(h.get("estimationMethod")) for h in est if h.get("estimationMethod")})
+        df.attrs["quality"] = {"estimated_pct": round(100.0 * len(est) / len(hist), 1), "method": ", ".join(methods) or None, "provider": "Electricity Maps"}
+    return df
 
 
 SOURCES: Dict[str, Callable] = {

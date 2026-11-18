@@ -210,7 +210,8 @@ def cmd_live_tick(args):
     out = tick(args.site, args.live_config)
     print(f"tick @ {out['now']}  ({out['seconds']} s)")
     for lid, st in out["status"].items():
-        print(f"  {lid:<20} {st:<13} {out['rows'].get(lid, 0):>6} readings fetched" + (f"   {out['errors'][lid]}" if lid in out["errors"] else ""))
+        note = "   provider estimates, not measurements: shown and scheduled on, no model trained or scored" if lid in out.get("estimated", []) else ""
+        print(f"  {lid:<20} {st:<13} {out['rows'].get(lid, 0):>6} readings fetched" + (f"   {out['errors'][lid]}" if lid in out["errors"] else "") + note)
     print(f"  weather forecasts for: {', '.join(out['weather']) or 'none'}")
     for lid, a in out["accuracy"].items():
         print(f"  forecast error {lid:<20} ours {a['mae_ours']:>5}  same-as-now {a['mae_persistence']:>5}  yesterday {a['mae_seasonal']:>5}   skill {a['skill_pct']:>5} %  band hit {a.get('band_hit_pct')} %  ({a['n_forecasts']} forecasts)")
