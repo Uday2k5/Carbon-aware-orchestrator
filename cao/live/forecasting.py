@@ -83,6 +83,7 @@ def daily_backtest(wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], last_co
         s_all = wide[loc]
         wx = weather.get(loc)
         e_ours, e_pers, e_seas = [], [], []          # each entry: array(24) of abs errors
+        inside, width = [], []
         last_curve = None
         n_days_scored = set()
         for start_k in range(days, 0, -refit_days):
@@ -103,6 +104,7 @@ def daily_backtest(wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], last_co
                         continue
                     parts = m.predict_parts(hist, wx, 24)
                     e_ours.append(np.abs(parts["p50"] - y)); e_pers.append(np.abs(parts["persistence"] - y)); e_seas.append(np.abs(parts["seasonal"] - y))
+                    inside.append((y >= parts["lo"]) & (y <= parts["hi"])); width.append(parts["hi"] - parts["lo"])
                     n_days_scored.add(d)
                     if off == 0:
                         last_curve = {"day": d.strftime("%Y-%m-%d"), "ts": [t.strftime(ISO) for t in tgt],
@@ -116,66 +118,81 @@ def daily_backtest(wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], last_co
             "n_days": len(n_days_scored), "n_forecasts": int(len(eo)),
             "mae_ours": round(float(eo.mean()), 1), "mae_persistence": round(float(ep.mean()), 1), "mae_seasonal": round(float(es.mean()), 1),
             "skill_pct": round((1 - float(eo.mean()) / naive) * 100, 1) if naive > 0 else 0.0,
+            "band_hit_pct": round(float(np.mean(inside)) * 100, 1), "band_width": round(float(np.mean(width)), 1),
             "by_horizon": {"ours": [round(float(v), 1) for v in eo.mean(axis=0)], "persistence": [round(float(v), 1) for v in ep.mean(axis=0)]},
             "last_day": last_curve,
         }
     return (res, blocks) if keep_models else res
 
 
-def forecast_value_study(cfg, cost_model, wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], blocks: Dict[str, list],
-                         last_complete: pd.Timestamp, days: int = 7, drain_days: int = 2) -> Optional[dict]:
-    """What is the forecast worth to the scheduler?  Same week of real grid data, same jobs, same
-    payback-aware policy, three forecasts: naive (same as now), our model (each hour forecast by the
-    model that existed then), perfect foresight.  Jobs arrive for `days` days and the run continues
-    `drain_days` more with no new jobs, so every variant finishes the same work before totals are compared."""
+def hourly_block_forecasts(wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], blocks: Dict[str, list], hours: pd.DatetimeIndex) -> Dict[str, list]:
+    """For every hour, the forecast the model that existed at that hour would have issued (None where no model existed)."""
+    table: Dict[str, list] = {}
+    for c, bl in blocks.items():
+        s_all, out = wide[c], []
+        for h in hours:
+            m = next((mm for (b0, b1, mm) in bl if b0 <= h < b1), None)
+            if m is None and bl and h >= bl[-1][1]:
+                m = bl[-1][2]                      # hours after the last block: its model is still strictly older than them
+            hist = contiguous_tail(s_all[s_all.index <= h])
+            if m is None or len(hist) < MIN_HOURS or hist.index[-1] != h:
+                out.append(None)
+            else:
+                p = m.predict_parts(hist, weather.get(c), 24, explain=False)
+                out.append({"p50": p["p50"], "lo": p["lo"], "hi": p["hi"], "model": "weather-trees" if m.diag.get("has_weather") else "trees"})
+        table[c] = out
+    return table
+
+
+def forecast_value_study(cfg, cost_model, wide: pd.DataFrame, hours: pd.DatetimeIndex, table: Dict[str, list],
+                         drain_days: int = 2, streams: int = 3) -> Optional[dict]:
+    """What is the forecast worth to the scheduler?  Same real grid data, same jobs, same payback-aware
+    rule, three forecasts: naive (same as now), our model (each hour forecast by the model that
+    existed then), perfect foresight.  Jobs stop arriving `drain_days` before the end so every variant
+    finishes the same work, and the result is averaged over several independent job streams."""
     from ..simulator.forecast_providers import ForecastProvider, OracleForecast, PersistenceForecast
     from ..simulator.policies import CarbonUnawarePolicy, MigrationAwarePolicy
     from ..simulator.sim import run_simulation
     from .twin import sample_arrivals, service_jobs
 
-    day0 = (last_complete + H1).floor("D")
-    hours = pd.date_range(day0 - pd.Timedelta(days=days + drain_days), day0 - H1, freq="1h")
     carried = wide.ffill()
-    locs = [c for c in wide.columns if c in blocks and carried[c].reindex(hours).notna().all()]
-    if len(locs) < 2:
+    locs = [c for c in wide.columns if c in table and carried[c].reindex(hours).notna().all()]
+    arrive = len(hours) - drain_days * 24
+    if len(locs) < 2 or arrive < 24:
         return None
     traces = {c: carried[c].reindex(hours).values.astype(float) for c in locs}
-    table: Dict[str, List[np.ndarray]] = {c: [] for c in locs}
-    for c in locs:
-        s_all = wide[c]
-        for h in hours:
-            m = next((mm for (b0, b1, mm) in blocks[c] if b0 <= h < b1), None)
-            hist = contiguous_tail(s_all[s_all.index <= h])
-            now_v = float(carried[c].loc[h])
-            if m is None or len(hist) < MIN_HOURS or hist.index[-1] != h:
-                table[c].append(np.full(24, now_v))
-            else:
-                table[c].append(np.concatenate([[now_v], m.predict(hist, weather.get(c), 24)[:23]]))
+    fc = {c: [np.full(24, traces[c][i]) if p is None else np.concatenate([[traces[c][i]], p["p50"][:23]]) for i, p in enumerate(table[c])] for c in locs}
 
     class TableForecast(ForecastProvider):
         name = "our model"
 
         def forecast(self, region, t, horizon):
-            return table[region][min(t, len(hours) - 1)][:horizon]
+            return fc[region][min(t, len(hours) - 1)][:horizon]
 
-    jobs = service_jobs(cfg, locs, 0.0)
-    for i, h in enumerate(hours[: days * 24]):
-        jobs += sample_arrivals(h, float(i), locs, cfg.arrival_rate)
     lat = {a: {b: cfg.latency_ms[a][b] for b in locs} for a in locs}
     cap = {c: cfg.capacity_cpu for c in locs}
-    run = lambda pol, fc: run_simulation(traces, jobs, pol, cost_model, lat, cap, forecast=fc)
-    naive = run(MigrationAwarePolicy(), PersistenceForecast(traces))
-    model = run(MigrationAwarePolicy(), TableForecast())
-    perfect = run(MigrationAwarePolicy(), OracleForecast(traces))
-    unaware = run(CarbonUnawarePolicy(), OracleForecast(traces))
-    gain = naive.total_g - perfect.total_g
+    tot = {"naive": [], "model": [], "perfect": [], "unaware": []}
+    late = {"naive": 0, "model": 0, "perfect": 0}
+    n_jobs = 0
+    for k in range(streams):
+        jobs = service_jobs(cfg, locs, 0.0)
+        for i, h in enumerate(hours[:arrive]):
+            jobs += sample_arrivals(h + pd.Timedelta(days=400 * k), float(i), locs, cfg.arrival_rate)   # shifted seed = another job stream
+        n_jobs += len(jobs)
+        run = lambda pol, f: run_simulation(traces, jobs, pol, cost_model, lat, cap, forecast=f)
+        res = {"naive": run(MigrationAwarePolicy(), PersistenceForecast(traces)), "model": run(MigrationAwarePolicy(), TableForecast()),
+               "perfect": run(MigrationAwarePolicy(), OracleForecast(traces)), "unaware": run(CarbonUnawarePolicy(), OracleForecast(traces))}
+        for key, r in res.items():
+            tot[key].append(r.total_g)
+            if key in late:
+                late[key] += r.deadline_violations
+    m = {key: float(np.mean(v)) for key, v in tot.items()}
+    gain = m["naive"] - m["perfect"]
     return {
-        "days": days, "from": hours[0].strftime(ISO), "to": hours[days * 24 - 1].strftime(ISO), "jobs": len(jobs), "grids": locs,
-        "unfinished": {"naive": naive.unfinished, "model": model.unfinished, "perfect": perfect.unfinished},
-        "naive_g": round(naive.total_g, 1), "model_g": round(model.total_g, 1), "perfect_g": round(perfect.total_g, 1),
-        "unaware_g": round(unaware.total_g, 1),
-        "saved_by_model_g": round(naive.total_g - model.total_g, 1),
-        "captured_pct": round((naive.total_g - model.total_g) / gain * 100, 1) if gain > 1e-6 else None,
-        "waits": {"naive": naive.waits, "model": model.waits, "perfect": perfect.waits},
-        "deadline_missed": {"naive": naive.deadline_violations, "model": model.deadline_violations, "perfect": perfect.deadline_violations},
+        "days": arrive // 24, "streams": streams, "from": hours[0].strftime(ISO), "to": hours[arrive - 1].strftime(ISO),
+        "jobs": n_jobs, "grids": locs, "naive_g": round(m["naive"], 1), "model_g": round(m["model"], 1), "perfect_g": round(m["perfect"], 1),
+        "unaware_g": round(m["unaware"], 1), "saved_by_model_g": round(m["naive"] - m["model"], 1),
+        "saved_pct": round((1 - m["model"] / m["naive"]) * 100, 2) if m["naive"] > 0 else None,
+        "perfect_pct": round((1 - m["perfect"] / m["naive"]) * 100, 2) if m["naive"] > 0 else None,
+        "captured_pct": round((m["naive"] - m["model"]) / gain * 100, 1) if gain > 1e-6 else None, "deadline_missed": late,
     }

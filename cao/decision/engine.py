@@ -30,6 +30,7 @@ class DecisionEngine:
         milp_time_limit_s: float = 20.0,
         allow_wait: bool = True,
         allow_move: bool = True,
+        risk_aware: bool = False,
     ) -> None:
         self.cost_model = cost_model
         self.regions = list(regions)
@@ -43,6 +44,8 @@ class DecisionEngine:
         self.milp_time_limit_s = milp_time_limit_s
         self.allow_wait = allow_wait
         self.allow_move = allow_move
+        self.risk_aware = risk_aware     # WAIT only if the later window beats running now even at the pessimistic forecast
+        self.ci_upper: Optional[Dict[str, Sequence[float]]] = None
         self.last_milp = None
 
     # ------------------------------------------------------------------ public
@@ -52,7 +55,9 @@ class DecisionEngine:
         ci_forecast: Dict[str, Sequence[float]],
         now_h: float = 0.0,
         mode: str = "heuristic",
+        ci_upper: Optional[Dict[str, Sequence[float]]] = None,
     ) -> Dict[str, Decision]:
+        self.ci_upper = ci_upper
         jobs = [j for j in jobs if not j.done]
         if mode == "milp" and jobs:
             try:
@@ -107,7 +112,7 @@ class DecisionEngine:
         if latest_start < earliest:
             return None  # deadline tight: fall back to "start now, best region"
 
-        best = None
+        best, now_best = None, None
         for r in A:
             start, tot = best_contiguous_window(ci[r], dur, earliest, latest_start)
             exec_g = job.power_kw * tot * self.slot_h
@@ -120,9 +125,23 @@ class DecisionEngine:
             total = exec_g + mig
             if best is None or total < best[0] - 1e-9:
                 best = (total, r, start, exec_g, mig)
+            now_g = job.power_kw * float(sum(ci[r][earliest:earliest + dur])) * self.slot_h
+            if r != job.region:
+                now_g += self.cost_model.carbon_g(job.state_gb, float(ci[job.region][earliest]), float(ci[r][earliest])).total_g
+            if now_best is None or now_g < now_best[0] - 1e-9:
+                now_best = (now_g, r)
         if best is None:
             return None
         total, r, start, exec_g, mig = best
+        if self.risk_aware and self.ci_upper is not None and start > earliest and r in self.ci_upper:
+            up = self.ci_upper[r]
+            pess = job.power_kw * float(sum(up[start:start + dur])) * self.slot_h + mig
+            if pess >= now_best[0]:          # the later window is not reliably cleaner: do not gamble, start now
+                if now_best[1] != job.region:
+                    return None              # start now elsewhere -> payback test decides and explains it
+                return Decision(job.job_id, ActionType.HOLD, target_region=job.region,
+                                reason="a cleaner window is forecast, but not reliably enough to wait for",
+                                remaining_h=job.remaining_h)
         baseline = job.power_kw * float(sum(ci[job.region][earliest:earliest + dur])) * self.slot_h
         saved = baseline - total
         if start > earliest:

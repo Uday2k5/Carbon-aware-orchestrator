@@ -29,7 +29,7 @@ Reproduce the numbers below: `cao live tick` then `python experiments/exp06_fore
    `forecast = now + s·(trees' change) + u·(same hour yesterday − now)`.
    A band only moves away from "same as now" if that improves held-out error by at least 5 %, so
    where the trees are weak the forecast falls back to the naive value by itself.
-6. **Uncertainty band:** 80th percentile of the absolute held-out error per horizon.
+6. **Uncertainty band:** its own model, see [08-uncertainty-and-anomalies.md](08-uncertainty-and-anomalies.md).
 7. **Fallbacks:** a grid with under four weeks of history gets "same hour yesterday", under two
    days "same as now". The dashboard says which is in use.
 
@@ -75,19 +75,31 @@ The dashboard shows the same four bars per grid, refreshed on every run.
 
 ## What the forecast is worth to the scheduler
 
-Same payback-aware rule, same jobs, seven days of real grid data, three forecasts: naive, our
-model (each hour using the model that existed at that hour), perfect foresight. Jobs stop arriving
-two days before the end so every variant finishes the same work. Run of 18 Nov 2026:
+Same jobs, same real grid data, three forecasts handed to the scheduler: naive ("same as now"), our
+model (each hour using a model that existed at that hour), perfect foresight. Jobs stop arriving two
+days before the end so every variant finishes the same work. `experiments/exp07_forecast_value.py`,
+28 days to 18 Nov 2026, two independent job streams, emissions in kg:
 
-| forecast given to the scheduler | emissions |
-| --- | --- |
-| naive (same as now) | 8.42 kg |
-| our model | 8.08 kg |
-| perfect foresight | 7.82 kg |
+| scheduler | naive forecast | our model | perfect foresight | model vs naive | perfect vs naive |
+| --- | --- | --- | --- | --- | --- |
+| payback rule (greedy) | 26.85 | 26.76 | 25.56 | 0.3 % lower | 4.8 % lower |
+| 24 h MILP plan | 26.95 | 26.31 | 24.41 | 2.4 % lower | 9.4 % lower |
 
-The model cuts emissions by 4.1 % against a naive forecast and captures 58 % of what perfect
-foresight would gain. The live scoreboard also carries a line "ours · naive forecast": the gap
-between it and "ours" is the model's contribution in real time.
+Reading it straight:
+
+- The forecast is a **small lever**. Even a perfect forecast is worth 5 to 9 %. The large savings
+  on the scoreboard (against carbon-unaware and always-greenest) come from the payback rule itself,
+  which refuses moves that never repay their own carbon. That part needs no forecast.
+- The **MILP gets more out of the same forecast** (2.4 % against 0.3 %), because it plans the whole
+  day; the greedy rule only uses the forecast to decide whether to wait.
+- With the greedy rule the gain is inside the noise between job streams. A second run with four
+  streams gave 1.1 %; the dashboard's own rolling study (about 12 days, three streams) showed 0.6 % on 18 Nov.
+- An earlier single-week run showed 4.1 % and "58 % of perfect foresight". That week was a
+  favourable draw, not the typical result, and those figures are withdrawn.
+
+The dashboard repeats the greedy study once a day on its latest window and shows whatever it finds.
+The live scoreboard also carries a line "ours · naive forecast"; over a few days that gap is one
+draw and swings a lot, so quote the study rather than the gap.
 
 ## Honest limits
 
@@ -108,4 +120,7 @@ between it and "ours" is the model's contribution in real time.
 - *Why trees and not a neural network?* Two thousand hourly points per grid is small tabular data;
   boosted trees are the right tool at that size. An LSTM would be compared, not expected to win.
 - *What does it use?* Mostly the current value, the hour of day and the wind forecast; the dashboard lists the drivers per grid.
-- *Does it matter?* 4 % fewer emissions than with a naive forecast on the same week, and about a fifth lower forecast error in the wind-driven grids.
+- *Does it matter?* Forecast error is about a fifth lower in the wind-driven grids. For emissions the forecast is a small lever:
+  about 2 % with the MILP plan and under 1 % with the greedy rule, where perfect foresight would give 5 to 9 %. The big saving is the payback rule.
+- *Then why build it?* Three things stand on it: the WAIT decision and the MILP plan, the uncertainty band, and the anomaly detector
+  (an hour can only be called unusual against an expectation).

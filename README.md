@@ -49,6 +49,10 @@ then follow **For teammates** below.
 2. **Forecast** the next 24 h per grid with a model trained here: regularised boosted trees on
    day-ahead weather forecasts (Open-Meteo) plus history, blended with naive forecasts per horizon.
    Retrained every run, scored daily on unseen days. Details and study: [docs/07-forecaster.md](docs/07-forecaster.md).
+   Each forecast carries an **uncertainty band** from two quantile models, recalibrated on every run from
+   the last week of forecasts that have come true. Every forecast is logged and scored when its hour arrives.
+   An **anomaly detector** on that log flags hours where a grid landed far outside what the model expected.
+   Details: [docs/08-uncertainty-and-anomalies.md](docs/08-uncertainty-and-anomalies.md).
 3. **Schedule** a rolling set of simulated jobs with the real engine: MOVE / WAIT / HOLD / REFUSE.
 4. **Score** five policies on the same jobs: ours, ours with the 24 h MILP plan, ours fed a naive
    forecast (the gap to "ours" is the model's contribution), always-greenest, carbon-unaware.
@@ -179,6 +183,7 @@ python experiments/exp03_forecast_sensitivity.py   # regret vs forecast error
 python experiments/exp04_network_energy_sensitivity.py
 python experiments/exp05_replay.py                 # visual replay: results/replay.html + replay.gif
 python experiments/exp06_forecaster_study.py       # forecaster vs naive, over/under-fit check (after `cao live tick`)
+python experiments/exp07_forecast_value.py         # what the forecast is worth to greedy vs MILP (about 30 min)
 ```
 
 ## Visual replay (for demos / viva)
@@ -315,6 +320,7 @@ Shared contract: `cao.core.models.Job` / `Decision`, `MigrationCostModel`, the C
 - [docs/05-week-plan.md](docs/05-week-plan.md) — 12-week plan for 3 students
 - [docs/06-database-schema.md](docs/06-database-schema.md) — sqlite tables
 - [docs/07-forecaster.md](docs/07-forecaster.md) — the trained carbon forecaster: design, study, over/under-fit check, limits
+- [docs/08-uncertainty-and-anomalies.md](docs/08-uncertainty-and-anomalies.md) — uncertainty band, live track record, anomaly detector
 
 ## Scope (deliberately reduced)
 

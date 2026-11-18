@@ -44,7 +44,7 @@ async function load() {
   renderAll();
 }
 
-function renderAll() { renderStatus(); renderHero(); renderCards(); renderForecast(); renderStage(); renderFeed(); renderScore(); buildCalc(); renderAbout(); }
+function renderAll() { renderStatus(); renderHero(); renderCards(); renderForecast(); renderEvents(); renderStage(); renderFeed(); renderScore(); buildCalc(); renderAbout(); }
 const acc = (id) => ((LIVE.accuracy || {}).per_location || {})[id];
 const card = (id) => (((LIVE.models || {}).forecaster || {}).per_location || {})[id];
 
@@ -89,6 +89,10 @@ function spark(l) {
   const fp = f.length ? `M${x(h.length - 1).toFixed(1)},${y(h[h.length - 1]).toFixed(1)}` + f.map((v, i) => `L${x(h.length + i).toFixed(1)},${y(v).toFixed(1)}`).join("") : "";
   return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><path d="${path(h, 0)}" fill="none" stroke="var(--ink-2)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>${fp ? `<path d="${fp}" fill="none" stroke="var(--s1)" stroke-width="1.6" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>` : ""}</svg>`;
 }
+function unusual(id) {
+  const a = ((LIVE.anomalies || {}).latest || {})[id];
+  return a && a.unusual ? `<span class="flag ${a.z < 0 ? "cleaner" : ""}" title="${num(a.actual)} against ${num(a.expected)} expected three hours earlier">UNUSUAL</span>` : "";
+}
 function renderCards() {
   $("#locs").innerHTML = LIVE.locations.map((l) => {
     if (!l.history) {
@@ -97,7 +101,7 @@ function renderCards() {
     }
     const s = l.stats7d || {}, st = l.status === "live" ? `${ago(l.updated_at)} ago` : l.status;
     return `<button class="loc" type="button" data-id="${l.id}" aria-pressed="${l.id === selected}">
-      <div class="loc-top"><span class="loc-name">${esc(l.name)}</span><span class="cc">${esc(l.country)}</span></div>
+      <div class="loc-top"><span class="loc-name">${esc(l.name)}${unusual(l.id)}</span><span class="cc">${esc(l.country)}</span></div>
       <div class="loc-ci"><span class="num">${num(l.ci_now)}</span><span class="unit">gCO₂/kWh</span><i class="swatch" style="background:${ciColor(l.ci_now)}"></i></div>
       ${spark(l)}
       <div class="loc-foot"><span title="lowest and highest in the last 7 days">7d ${num(s.min)}–${num(s.max)}</span><span class="st ${esc(l.status)}" title="age of the latest reading">${esc(st)}</span></div>
@@ -174,6 +178,8 @@ function renderAccuracy(l) {
   box.innerHTML = `<h3>Forecast accuracy · ${esc(l.name)} <span class="badge ${a.skill_pct > 0 ? "" : "flat"}" style="margin-left:6px">${a.skill_pct > 0 ? num(a.skill_pct) + "% better than best naive" : "level with naive"}</span></h3>
     <div class="acc-grid">${tiles.map(([n, v]) => `<div class="tile ${v === best ? "best" : ""}"><div class="v">${num(v, 1)}</div><div class="l">${esc(n)}</div></div>`).join("")}</div>
     <p class="note">Mean error in gCO₂/kWh, 24 hours ahead. ${a.n_forecasts} forecasts over the last ${a.n_days} days, each made by a model that had not seen that day. Lower is better.</p>
+    ${bandLine(l.id, a)}
+    ${trackLine(l.id)}
     ${a.mae_official_last_day != null ? `<div class="kv"><span>${esc(d.day)}: ours vs operator's forecast</span><span>${num(a.mae_ours_last_day, 1)} vs ${num(a.mae_official_last_day, 1)}</span></div>` : ""}
     <h3 class="gap">Error by hours ahead</h3>
     <div class="chart mini"><canvas id="hz-chart" aria-label="Forecast error by hours ahead"></canvas></div>
@@ -192,6 +198,43 @@ function renderAccuracy(l) {
   mk("acc-chart", { type: "line", data: { labels: d.ts.map((t) => hhmm(new Date(t))), datasets: [
     { label: "actual", data: d.actual, borderColor: css("--ink-2"), borderWidth: 2, pointRadius: 0, tension: 0.25 },
     { label: "our forecast", data: d.ours, borderColor: css("--s1"), borderWidth: 2, pointRadius: 0, tension: 0.25 }] }, options: base });
+}
+
+function bandLine(id, a) {
+  const rc = ((LIVE.track || {})[id] || {}).recal;
+  if (rc) return `<div class="kv"><span>Shaded band held the true value</span><span>${num(rc.hit_pct)}% of ${num(rc.n)} checked forecasts (aim ${num(rc.target_pct)}%) · ${num(rc.model_band_hit_pct)}% before live recalibration</span></div>`;
+  return a.band_hit_pct != null ? `<div class="kv"><span>Shaded band held the true value</span><span>${num(a.band_hit_pct)}% of unseen hours (aim 80%)</span></div>` : "";
+}
+function trackLine(id) {
+  const t = (LIVE.track || {})[id];
+  if (!t || !t.live_scored) return `<div class="kv"><span>Live track record</span><span>starts once today's forecasts can be checked</span></div>`;
+  return `<div class="kv"><span>Live track record since ${fmtT(t.since)}</span><span>${num(t.live_scored)} forecasts checked · error ${num(t.mae, 1)} vs ${num(t.naive_mae, 1)} naive</span></div>`;
+}
+
+/* ------------------------------------------------------------------ anomaly detector */
+function renderEvents() {
+  const an = LIVE.anomalies || {}, list = $("#event-list"), side = $("#event-side"), nm = (id) => (byId(id) || {}).name || id;
+  if (!an.hours_checked) { list.innerHTML = `<li>The detector needs a few hours of logged forecasts before it can judge anything.</li>`; side.innerHTML = ""; return; }
+  $("#events-sub").textContent = `Hours when a grid landed far from where the model expected it ${an.lead_h} hours earlier. ${num(an.hours_checked)} grid-hours checked in the last two weeks, ${num(an.alarm_rate_pct, 1)}% flagged.`;
+  list.innerHTML = (an.events || []).slice(0, 14).map((e) => {
+    const span = e.hours > 1 ? `${fmtT(e.start)} to ${hhmm(new Date(e.end))}, ${e.hours} h` : fmtT(e.peak);
+    const band = e.band && e.band[0] != null ? ` (band ${num(e.band[0])}–${num(e.band[1])})` : "";
+    return `<li><div class="row1"><span class="chip ${e.direction === "dirtier" ? "REFUSE" : "MOVE"}">${e.direction === "dirtier" ? "DIRTIER" : "CLEANER"}</span><span class="job-id">${esc(nm(e.location))}</span>${e.ongoing ? `<span class="badge">now</span>` : ""}<span class="when">${span}</span></div>
+      <div class="route"><b>${num(e.actual)}</b> gCO₂/kWh where the model expected ${num(e.expected)}${band} · ${num(Math.abs(e.z), 1)}× the usual error, alarm line ${num(e.limit, 1)}×</div><div class="why">${esc(e.why.text)}</div></li>`;
+  }).join("") || `<li>No unusual hours in the last 7 days. Every grid stayed within what the model considers normal.</li>`;
+  const SPAN = 1.6, mark = 50 / SPAN;                              // bar length = gap as a share of that grid's own alarm line
+  const rows = LIVE.locations.filter((l) => (an.latest || {})[l.id]).map((l) => {
+    const x = an.latest[l.id], share = Math.abs(x.z) / x.limit, w = Math.min(SPAN, share) * mark, left = x.z >= 0 ? 50 : 50 - w;
+    const col = x.unusual ? (x.z > 0 ? "var(--refuse)" : "var(--move)") : "var(--muted)";
+    return `<div class="zrow"><span>${esc(l.name)}</span><div class="ztrack" title="${num(x.actual)} against ${num(x.expected)} expected, ${num(Math.abs(x.z), 1)}× the usual error, alarm line ${num(x.limit, 1)}×"><i class="zmid"></i><i class="zfill" style="left:${left}%;width:${w}%;background:${col}"></i><i class="zmark" style="left:${50 + mark}%"></i><i class="zmark" style="left:${50 - mark}%"></i></div><span>${num(share * 100)}%</span></div>`;
+  }).join("");
+  const per = an.per_location || {};
+  side.innerHTML = `<h3>How close is each grid to its alarm line</h3>
+    <div class="gen">${rows}</div>
+    <p class="note">Latest checked hour. The bar is the gap between the grid and the forecast made ${an.lead_h} hours earlier, as a share of that grid's alarm line. Left is cleaner than expected, right is dirtier. Past a mark and outside the forecast band counts as unusual.</p>
+    <h3 class="gap">How it works</h3>
+    <ul class="plain"><li>Built on the forecaster: every forecast is logged, then compared with what the grid did.</li><li>The gap is measured in units of that grid's own usual forecast error over the last two weeks.</li><li>The alarm line is ${an.threshold}× the usual error, raised on jumpy grids to the level only about ${num(an.rare_pct)} hour in 100 crosses. A volatile grid is not flagged for being itself.</li><li>Each event gets a first explanation: the wind that blew against the wind that was forecast.</li></ul>
+    <div class="scroll"><table class="mini-t" style="margin-top:10px"><tr><th>grid</th><th>flagged</th><th>usual error</th><th>alarm line</th></tr>${LIVE.locations.filter((l) => per[l.id]).map((l) => `<tr><td>${esc(l.name)}</td><td>${per[l.id].flagged} of ${per[l.id].hours_checked}</td><td>${num(per[l.id].scale_g, 1)} g</td><td>${num(per[l.id].limit * per[l.id].scale_g)} g (${num(per[l.id].limit, 1)}×)</td></tr>`).join("")}</table></div>`;
 }
 
 /* ------------------------------------------------------------------ the model */
@@ -215,6 +258,7 @@ function renderModel(l) {
       <div class="kv"><span>Inputs</span><span>${esc(f.inputs)} · weather from ${esc(f.weather_source)}</span></div>
       <div class="kv"><span>Trained on</span><span>${num(c.rows)} examples from ${num(c.hours)} hours of ${esc(l.name)} data · ${c.rounds} boosting rounds</span></div>
       <div class="kv"><span>Guard against overfitting</span><span>${esc(f.validation)}</span></div>
+      <div class="kv"><span>Uncertainty band</span><span>${esc(f.uncertainty || "")}${uncLine(l.id, c, a)}</span></div>
     </div>
     <h3>Does it generalise? Error in gCO₂/kWh</h3>
     <div class="gen">
@@ -234,19 +278,29 @@ function renderModel(l) {
     <p class="note">Learned on held-out days. Where the trees do not clearly beat "same as now", the weight drops to zero by itself.</p>
     ${valueBlock()}`;
 }
+function uncLine(id, c, a) {
+  const rc = ((LIVE.track || {})[id] || {}).recal, w = ((LIVE.track || {})[id] || {}).widen_now;
+  let t = c.val_band_coverage != null ? ` · held ${num(c.val_band_coverage * 100)}% of held-out hours` : "";
+  if (rc) t += `; on later forecasts ${num(rc.model_band_hit_pct)}% on its own and ${num(rc.hit_pct)}% once recalibrated (aim ${num(rc.target_pct)}%)`;
+  else if (a && a.band_hit_pct != null) t += ` and ${num(a.band_hit_pct)}% of unseen ones (aim 80%)`;
+  const most = w ? Math.max(...Object.values(w)) : null;
+  if (most != null) t += most > 0 ? `. Right now the band is widened by up to ±${num(most, 1)} g` : `. Right now the model's own band is holding, so nothing is added`;
+  return t;
+}
 function valueBlock() {
   const v = (LIVE.accuracy || {}).forecast_value; if (!v) return "";
-  const mx = Math.max(v.naive_g, v.model_g, v.perfect_g), pct = v.naive_g > 0 ? (1 - v.model_g / v.naive_g) * 100 : 0;
-  const tail = v.model_g <= v.perfect_g ? `On this week that matched what perfect foresight achieves with the same rule.`
-    : (v.captured_pct != null ? `That is ${num(v.captured_pct)}% of what perfect foresight would have gained.` : "");
+  const mx = Math.max(v.naive_g, v.model_g, v.perfect_g);
+  const line = v.saved_pct > 0.2
+    ? `Same scheduler and same jobs on ${v.days} days of real grid data: our forecast lowers emissions by <b>${num(v.saved_pct, 1)}%</b> against a naive forecast. Perfect foresight would reach ${num(v.perfect_pct, 1)}%, so the model captures ${v.captured_pct != null ? num(v.captured_pct) + "%" : "part"} of what is possible.`
+    : `On these ${v.days} days the forecast made no measurable difference to emissions; perfect foresight would have saved ${num(v.perfect_pct, 1)}%.`;
   return `<h3 class="gap">What the forecast is worth to the scheduler</h3>
     <div class="gen">
       ${barRow("naive forecast", v.naive_g / 1000, mx / 1000, "var(--s5)", " kg")}
       ${barRow("our model", v.model_g / 1000, mx / 1000, "var(--s3)", " kg")}
       ${barRow("perfect foresight", v.perfect_g / 1000, mx / 1000, "var(--ink-2)", " kg")}
     </div>
-    <p class="value-line">${pct > 0.5 ? `Same scheduler, same ${v.jobs} jobs, ${v.days} days of real grid data: our forecast cuts emissions by <b>${num(pct, 1)}%</b> against a naive forecast. ${tail}` : `On this week the forecast made no measurable difference to emissions.`}</p>
-    <p class="note">${fmtT(v.from)} to ${fmtT(v.to)} UTC. Each hour used the model that existed at that hour. New jobs stop two days before the end so every variant finishes the same work.</p>`;
+    <p class="value-line">${line}</p>
+    <p class="note">${fmtT(v.from)} to ${fmtT(v.to)} UTC, averaged over ${v.streams} independent job streams. Each hour used the model that existed at that hour. New jobs stop two days before the end so every variant finishes the same work. Waiting for cleaner hours is a small lever here; most of the saving on the scoreboard comes from refusing moves that do not pay back.</p>`;
 }
 
 /* ------------------------------------------------------------------ scheduler stage + feed */
@@ -370,6 +424,9 @@ function renderAbout() {
   const hrs = Math.max(...withData().map((l) => l.hours_of_history || 0));
   real.push(`Weather forecasts for each grid from <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>, as issued a day ahead`);
   real.push(`The forecaster: trained here on up to ${num(hrs)} hours of that history per grid, retrained every run, scored daily on days it has not seen`);
+  real.push("Forecast log: every forecast is written down when issued and scored when the hour arrives");
+  real.push("Uncertainty band: recalibrated on each run from the last week of checked forecasts");
+  real.push("Anomaly detector: flags hours where the grid landed far outside what the model expected");
   real.push("Every decision: computed by the same engine the simulator and the Kubernetes controller use");
   real.push("Emission totals: each policy is charged for running and for moving, whether or not it counted the cost");
   $("#real-list").innerHTML = real.map((x) => `<li>${x}</li>`).join("");

@@ -14,6 +14,11 @@ Design (chosen by a walk-forward study on 28 unseen days across five grids):
          forecast = now + s * model_change + u * (same_hour_yesterday - now)
      so where the trees are weak the forecast shrinks towards the naive ones on its own.
 
+  6. Uncertainty: two more tree models predict the 10th and 90th percentile of the change
+     (quantile loss).  Their interval is then widened or narrowed, per horizon band, by the amount
+     needed to contain 80 % of the held-out days (conformalised quantile regression), so the band
+     is adaptive (wide when the situation is uncertain) and honest about its coverage.
+
 Diagnostics kept on the object (shown on the dashboard): error on recent training days, on the
 held-out days, for both naive baselines, the blend weights, an 80 % error band per horizon and
 which inputs matter (permutation importance on the held-out days).
@@ -35,6 +40,7 @@ VAL_DAYS = 14
 MIN_HOURS = 24 * 28            # 14 days to learn from + 14 held out
 S_GRID = np.round(np.arange(0.0, 1.21, 0.1), 2)
 U_GRID = np.round(np.arange(0.0, 0.81, 0.2), 2)
+COVERAGE = 0.80                # nominal coverage of the uncertainty band (10th to 90th percentile)
 FRIENDLY = {
     "ci": "carbon intensity now", "wind_tgt": "wind forecast", "wind3_tgt": "wind power forecast",
     "wind_max_tgt": "peak wind forecast", "wind_chg": "change in wind", "solar_tgt": "sunshine forecast",
@@ -89,7 +95,9 @@ class WeatherBlendForecaster:
         self.model = None
         self.cols: List[str] = []
         self.blend: Dict[Tuple[int, int], Tuple[float, float]] = {b: (1.0, 0.0) for b in self.buckets}
-        self.band: np.ndarray = np.zeros(max_horizon)
+        self.band: np.ndarray = np.zeros(max_horizon)       # simple symmetric band (kept for comparison)
+        self.q_models: dict = {}                             # {0.1: trees, 0.9: trees} on the change
+        self.q_adjust: Dict[Tuple[int, int], float] = {}     # conformal widening per horizon band
         self.diag: dict = {}
 
     # ------------------------------------------------------------------ fitting
@@ -98,6 +106,12 @@ class WeatherBlendForecaster:
         mono = [(-1 if c in ("wind_tgt", "wind3_tgt", "wind_max_tgt") else 0) for c in self.cols]
         return HistGradientBoostingRegressor(max_iter=n_iter, learning_rate=0.05, max_leaf_nodes=15, min_samples_leaf=40,
                                              l2_regularization=1.0, monotonic_cst=mono, random_state=self.random_state)
+
+    def _qtrees(self, q: float, n_iter: int):
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        mono = [(-1 if c in ("wind_tgt", "wind3_tgt", "wind_max_tgt") else 0) for c in self.cols]
+        return HistGradientBoostingRegressor(loss="quantile", quantile=q, max_iter=n_iter, learning_rate=0.05, max_leaf_nodes=15,
+                                             min_samples_leaf=40, l2_regularization=1.0, monotonic_cst=mono, random_state=self.random_state)
 
     def fit(self, ci: pd.Series, wx: Optional[pd.DataFrame] = None) -> "WeatherBlendForecaster":
         ci = ci.astype(float)
@@ -133,7 +147,30 @@ class WeatherBlendForecaster:
         band = pd.Series(band).interpolate(limit_direction="both").rolling(3, center=True, min_periods=1).mean().values
         self.band = band
 
+        # uncertainty: quantile trees on the earlier data, rounds by pinball loss on the held-out days,
+        # then a per-band conformal adjustment so the interval holds COVERAGE of those held-out days
+        alpha, q_rounds, q_val = 1.0 - COVERAGE, {}, {}
+        for q in (alpha / 2, 1 - alpha / 2):
+            qp = self._qtrees(q, 300).fit(a[self.cols], a["_y"])
+            st = list(qp.staged_predict(b[self.cols]))
+            pin = [float(np.mean(np.maximum(q * (yb - p), (q - 1) * (yb - p)))) for p in st]
+            k = int(max(30, min(300, round((int(np.argmin(pin)) + 1) * 1.15))))
+            q_rounds[q], q_val[q] = k, st[min(k, len(st)) - 1]
+        q_lo, q_hi = q_val[alpha / 2], q_val[1 - alpha / 2]
+        score = np.maximum(q_lo - yb, yb - q_hi)                 # how far outside the raw interval the truth fell
+        self.q_adjust = {}
+        for lo, hi in self.buckets:
+            mk = (hb >= lo) & (hb <= hi)
+            n_b = int(mk.sum())
+            self.q_adjust[(lo, hi)] = float(np.quantile(score[mk], min(1.0, COVERAGE * (1 + 1.0 / max(n_b, 1))))) if n_b else 0.0
+        adj = np.zeros(len(b))
+        for (lo, hi), v in self.q_adjust.items():
+            adj[(hb >= lo) & (hb <= hi)] = v
+        val_cover = float(np.mean((yb >= np.minimum(q_lo - adj, blended)) & (yb <= np.maximum(q_hi + adj, blended))))
+        val_width = float(np.mean(np.maximum(q_hi + adj, blended) - np.minimum(q_lo - adj, blended)))
+
         self.model = self._trees(n_iter).fit(df[self.cols], df["_y"])
+        self.q_models = {q: self._qtrees(q, q_rounds[q]).fit(df[self.cols], df["_y"]) for q in q_rounds}
         recent = df[df["_t_target"] > cut]
         self.diag = {
             "rows": int(len(df)), "hours": int(n), "rounds": n_iter, "features": len(self.cols),
@@ -145,6 +182,8 @@ class WeatherBlendForecaster:
             "val_mae_seasonal": round(float(np.abs(yb - seas_d).mean()), 1),
             "blend": {f"{lo}-{hi}": {"trees": self.blend[(lo, hi)][0], "yesterday": self.blend[(lo, hi)][1]} for lo, hi in self.buckets},
             "drivers": self._drivers(probe, b, yb),
+            "band_coverage_target": COVERAGE, "val_band_coverage": round(val_cover, 3), "val_band_width": round(val_width, 1),
+            "val_simple_band_coverage": round(float(np.mean(abs_err <= band[hb - 1])), 3), "val_simple_band_width": round(float(2 * band[hb - 1].mean()), 1),
             "trained_through": idx[-1].strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         return self
@@ -175,18 +214,19 @@ class WeatherBlendForecaster:
         last = np.array([len(ci) - 1])
         return pd.concat([_rows(F, v, idx, wx, last, h, False) for h in range(1, horizon + 1)], ignore_index=True)
 
-    def predict_parts(self, ci: pd.Series, wx: Optional[pd.DataFrame] = None, horizon: int = 24) -> dict:
+    def predict_parts(self, ci: pd.Series, wx: Optional[pd.DataFrame] = None, horizon: int = 24, explain: bool = True) -> dict:
         horizon = min(horizon, self.max_horizon)
         rows = self._predict_rows(ci, wx, horizon)
         d = self.model.predict(rows[self.cols])
-        flat = rows.copy()                       # counterfactual: the weather stays as it is now
-        if wx is not None:
+        d_flat = d
+        if explain and wx is not None:           # counterfactual: the weather stays as it is now
+            flat = rows.copy()
             now_wx = wx.reindex([ci.index[-1]])
             for c in WX_VARS:
                 flat[c + "_tgt"] = float(now_wx[c].iloc[0]) if c in now_wx and pd.notna(now_wx[c].iloc[0]) else np.nan
             for c in CHG_VARS:
                 flat[c + "_chg"] = 0.0
-        d_flat = self.model.predict(flat[self.cols])
+            d_flat = self.model.predict(flat[self.cols])
         pers, seas = rows["_pers"].values, rows["_seas"].values
         p, eff = np.zeros(horizon), np.zeros(horizon)
         hh = rows["h"].values
@@ -196,8 +236,21 @@ class WeatherBlendForecaster:
             eff[mk] = s * (d[mk] - d_flat[mk])
         p = np.maximum(p, 0.0)
         band = self.band[:horizon]
-        return {"p50": p, "lo": np.maximum(p - band, 0.0), "hi": p + band, "weather_effect": eff,
-                "persistence": pers, "seasonal": seas}
+        out = {"p50": p, "weather_effect": eff, "persistence": pers, "seasonal": seas,
+               "lo_simple": np.maximum(p - band, 0.0), "hi_simple": p + band}
+        if self.q_models:
+            alpha = 1.0 - COVERAGE
+            ql = self.q_models[alpha / 2].predict(rows[self.cols])
+            qh = self.q_models[1 - alpha / 2].predict(rows[self.cols])
+            for (lo, hi), v in self.q_adjust.items():
+                mk = (hh >= lo) & (hh <= hi)
+                ql[mk] -= v
+                qh[mk] += v
+            out["lo"] = np.maximum(np.minimum(pers + ql, p), 0.0)      # the point forecast always sits inside its band
+            out["hi"] = np.maximum(pers + qh, p)
+        else:
+            out["lo"], out["hi"] = out["lo_simple"], out["hi_simple"]
+        return out
 
     def predict(self, ci: pd.Series, wx: Optional[pd.DataFrame] = None, horizon: int = 24) -> np.ndarray:
-        return self.predict_parts(ci, wx, horizon)["p50"]
+        return self.predict_parts(ci, wx, horizon, explain=False)["p50"]

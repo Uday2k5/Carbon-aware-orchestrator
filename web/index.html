@@ -18,7 +18,7 @@
     <span>Carbon Payback <b>Live</b></span>
   </a>
   <nav class="bar-nav" aria-label="Sections">
-    <a href="#grid">Grid</a><a href="#forecast">Forecast</a><a href="#model">Model</a><a href="#scheduler">Scheduler</a><a href="#score">Scoreboard</a><a href="#calc">Calculator</a><a href="#about">Method</a>
+    <a href="#grid">Grid</a><a href="#forecast">Forecast</a><a href="#model">Model</a><a href="#events">Events</a><a href="#scheduler">Scheduler</a><a href="#score">Scoreboard</a><a href="#calc">Calculator</a><a href="#about">Method</a>
   </nav>
   <div class="bar-right">
     <span class="pill" id="status" title="When the grid data was last refreshed"><i class="dot"></i><span id="status-text">loading…</span><span id="status-short"></span></span>
@@ -55,6 +55,14 @@
     <div class="two">
       <div class="panel" id="model-card"></div>
       <div class="panel" id="model-side"></div>
+    </div>
+  </section>
+
+  <section id="events" class="sec">
+    <div class="sec-head"><h2>Unusual grid behaviour</h2><p id="events-sub">Hours when a grid landed far from where the model expected it.</p></div>
+    <div class="two">
+      <div class="panel"><h3>Events in the last 7 days</h3><ul class="feed" id="event-list"></ul></div>
+      <div class="panel" id="event-side"></div>
     </div>
   </section>
 

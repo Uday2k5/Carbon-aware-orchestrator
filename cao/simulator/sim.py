@@ -70,6 +70,7 @@ def run_simulation(
     log_decisions: bool = False,
     resume_cost: bool = True,
     record_timeline: bool = False,
+    forecast_upper: Optional[ForecastProvider] = None,
 ) -> SimResult:
     traces = {r: np.asarray(list(v), dtype=float) for r, v in traces.items()}
     regions = list(traces)
@@ -103,7 +104,7 @@ def run_simulation(
             t=t, now_h=now_h, slot_h=slot_h, regions=regions, ci_now=ci_now,
             forecast=forecast, cost_model=cost_model, latency_ms=latency_ms,
             capacity=capacity, load=dict(load), horizon_slots=horizon_slots,
-            evaluation_horizon_h=evaluation_horizon_h, margin_g=margin_g,
+            evaluation_horizon_h=evaluation_horizon_h, margin_g=margin_g, forecast_upper=forecast_upper,
         )
         decisions = policy.decide_all(ctx, active)
 

@@ -20,14 +20,17 @@ import requests
 from ..core.config import load_settings
 from ..migration.cost_model import MigrationCostModel
 from .config import load_dotenv, load_live_config
-from .forecasting import daily_backtest, fit_models, forecast_value_study, predict
+from .anomaly import detect
+from .forecasting import daily_backtest, fit_models, forecast_value_study, hourly_block_forecasts, predict
 from .sources import FORWARD, SOURCES, MissingKey, to_hourly
 from .store import LiveStore
+from .track import apply_widening, backfill_log, band_widening, log_forecasts, score_log, track_summary
 from .twin import ISO, LiveTwin
 from .weather import fetch_weather, update_weather
 
 ROOT = Path(__file__).resolve().parents[2]
 H1 = pd.Timedelta(hours=1)
+ACC_VERSION = 2            # bump when the daily scoring changes
 STATE_VERSION = 4          # bump when twin logic changes; the hosted twin then rebuilds from recorded data
 DEC_COLS = ["ts", "job", "kind", "state_gb", "action", "from", "to", "saved_g", "migration_g", "payback_h",
             "remaining_h", "resume_at", "reason"]
@@ -119,7 +122,7 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     # ------------------------------------------------------------ 3. score the forecaster (once per UTC day)
     today = (last_complete + H1).strftime("%Y-%m-%d")
     acc = store.load_json("accuracy.json")
-    if not acc or acc.get("date") != today or acc.get("version") != STATE_VERSION:
+    if not acc or acc.get("date") != today or acc.get("version") != ACC_VERSION:
         per, blocks = daily_backtest(filled, weather, last_complete, bt_days, bt_refit, keep_models=True)
         snaps = store.read_rows("official_fc.csv")
         for lid, a_ in per.items():
@@ -132,12 +135,18 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
                 if ok.sum() >= 12:
                     a_["mae_official_last_day"] = round(float(np.abs(sn["ci"].values[ok] - actual[ok]).mean()), 1)
                     a_["mae_ours_last_day"] = round(float(np.abs(np.array(a_["last_day"]["ours"]) - np.array(a_["last_day"]["actual"])).mean()), 1)
+        value = None
         try:
-            value = forecast_value_study(cfg, cm, filled, weather, blocks, last_complete, days=max(1, min(7, bt_days - 2)))
+            day0 = (last_complete + H1).floor("D")
+            span = pd.date_range(day0 - pd.Timedelta(days=bt_days), last_complete, freq="1h")
+            table = hourly_block_forecasts(filled, weather, blocks, span)       # what each past hour's model would have issued
+            past = span < last_complete                                         # the current hour is logged below as a live forecast
+            backfill_log(store, span[past], {c: [x for x, k in zip(t, past) if k] for c, t in table.items()})
+            study_hours = span[span < day0]
+            value = forecast_value_study(cfg, cm, filled, study_hours, {c: t[:len(study_hours)] for c, t in table.items()})
         except Exception as exc:
-            value = None
             log(f"  ! forecast value study: {type(exc).__name__}: {str(exc)[:140]}")
-        acc = {"date": today, "version": STATE_VERSION, "per_location": per, "forecast_value": value,
+        acc = {"date": today, "version": ACC_VERSION, "per_location": per, "forecast_value": value,
                "method": f"walk-forward: the model is refit every {bt_refit} days on data before each block of the last {bt_days} days and "
                          "asked for a 24 h forecast four times a day; nothing it is scored on was seen in training"}
         store.save_json("accuracy.json", acc)
@@ -171,6 +180,16 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
         models = fit_models(filled, weather, last_complete)
     preds = predict(models, filled, weather, last_complete)
     store.save_json("state.json", dict(twin.to_state(), version=STATE_VERSION))
+
+    # ------------------------------------------------------------ 4b. log what was just forecast, score what has matured, look for anomalies
+    log_forecasts(store, last_complete, preds, "live")
+    scored = score_log(store, filled, last_complete)
+    widen = band_widening(scored, last_complete)                  # what the last week of checked forecasts says the band needs
+    apply_widening(preds, widen)
+    track = track_summary(scored)
+    for lid, w in widen.items():
+        track.setdefault(lid, {})["widen_now"] = {str(h): v for h, v in sorted(w.items())}
+    anomalies = detect(scored, weather, last_complete)
     store.append_rows("decisions.csv", [[r[c] for c in DEC_COLS] for r in feed], DEC_COLS)
 
     # ------------------------------------------------------------ 5. operators' own forward forecasts (where published)
@@ -244,6 +263,8 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
         "locations": locations,
         "latency_ms": cfg.latency_ms,
         "accuracy": acc,
+        "track": track,
+        "anomalies": anomalies,
         "models": {"forecaster": {
             "name": "Weather-driven carbon forecaster",
             "predicts": "grid carbon intensity for each of the next 24 hours, per grid",
@@ -252,6 +273,8 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
             "inputs": "day-ahead weather forecasts (wind, sunshine, temperature, cloud; several points per grid), recent history, calendar",
             "weather_source": "Open-Meteo, forecasts as issued one day earlier",
             "retrained": _iso(now), "validation": "boosting rounds and blend weights are chosen on the most recent 14 days, never on training data",
+            "uncertainty": "two more tree models predict the 10th and 90th percentile; the band is calibrated on the held-out days, "
+                           "then widened live by what the last week of checked forecasts says it needed",
             "per_location": model_cards}},
         "twin": tw,
         "cost_model": {"checkpoint": [cm.checkpoint.a, cm.checkpoint.b], "transfer": [cm.transfer.a, cm.transfer.b],
@@ -269,4 +292,4 @@ def tick(site_dir="site", config_path=None, now=None, session=None, sources: Opt
     return {"now": _iso(now), "status": status, "errors": errors, "rows": rows, "hours_processed": len(pending),
             "new_decisions": len(feed), "totals": {p["id"]: p["total_g"] for p in tw["policies"]}, "site": str(site),
             "seconds": live["meta"]["build_seconds"], "weather": sorted(weather), "accuracy": acc.get("per_location", {}),
-            "forecast_value": acc.get("forecast_value")}
+            "forecast_value": acc.get("forecast_value"), "anomalies": anomalies, "track": track}

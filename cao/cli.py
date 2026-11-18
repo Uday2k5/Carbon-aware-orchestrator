@@ -213,10 +213,20 @@ def cmd_live_tick(args):
         print(f"  {lid:<20} {st:<13} {out['rows'].get(lid, 0):>6} readings fetched" + (f"   {out['errors'][lid]}" if lid in out["errors"] else ""))
     print(f"  weather forecasts for: {', '.join(out['weather']) or 'none'}")
     for lid, a in out["accuracy"].items():
-        print(f"  forecast error {lid:<20} ours {a['mae_ours']:>5}  same-as-now {a['mae_persistence']:>5}  yesterday {a['mae_seasonal']:>5}   skill {a['skill_pct']:>5} %  ({a['n_forecasts']} forecasts)")
+        print(f"  forecast error {lid:<20} ours {a['mae_ours']:>5}  same-as-now {a['mae_persistence']:>5}  yesterday {a['mae_seasonal']:>5}   skill {a['skill_pct']:>5} %  band hit {a.get('band_hit_pct')} %  ({a['n_forecasts']} forecasts)")
     v = out.get("forecast_value")
     if v:
-        print(f"  forecast value, last {v['days']} days: naive {v['naive_g']:,.0f} g  our model {v['model_g']:,.0f} g  perfect {v['perfect_g']:,.0f} g  -> captured {v['captured_pct']} %")
+        print(f"  forecast value ({v['days']} days x {v['streams']} job streams): naive {v['naive_g']:,.0f} g  our model {v['model_g']:,.0f} g ({v['saved_pct']} % lower)  perfect {v['perfect_g']:,.0f} g ({v['perfect_pct']} % lower)")
+    for lid, t in (out.get("track") or {}).items():
+        rc = t.get("recal")
+        if rc:
+            live_part = f"   live forecasts checked: {t['live_scored']}" + (f" (error {t['mae']} vs naive {t['naive_mae']})" if t.get("live_scored") else "")
+            print(f"  uncertainty band {lid:<20} model's own {rc['model_band_hit_pct']:>5} %  recalibrated live {rc['hit_pct']:>5} %  (aim {rc['target_pct']:.0f} %, {rc['n']} checked forecasts){live_part}")
+    an = out.get("anomalies") or {}
+    if an.get("hours_checked"):
+        print(f"  anomaly detector: {an['hours_checked']} grid-hours checked, {an['alarm_rate_pct']} % flagged, {len(an['events'])} events in the last 7 days")
+        for e in an["events"][:4]:
+            print(f"     {e['location']:<20} {e['peak'][:16]}  {e['actual']:.0f} vs {e['expected']:.0f} expected  {e['z']:+.1f}x usual error (alarm line {e['limit']})  {e['why']['text']}")
     print(f"  hours processed: {out['hours_processed']}   new decisions: {out['new_decisions']}")
     print("  cumulative gCO2e: " + "  ".join(f"{k}={v:,.0f}" for k, v in out["totals"].items()))
     print(f"  dashboard: {out['site']}/index.html   (cao live serve --site {out['site']})")

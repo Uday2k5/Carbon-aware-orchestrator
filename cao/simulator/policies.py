@@ -37,9 +37,13 @@ class SimContext:
     horizon_slots: int = 24
     evaluation_horizon_h: float = 24.0
     margin_g: float = 0.0
+    forecast_upper: Optional[ForecastProvider] = None      # pessimistic (upper-band) forecast, when a model provides one
 
     def forecasts(self, provider: Optional[ForecastProvider] = None) -> Dict[str, np.ndarray]:
         return (provider or self.forecast).all(self.regions, self.t, self.horizon_slots)
+
+    def upper(self) -> Optional[Dict[str, np.ndarray]]:
+        return self.forecast_upper.all(self.regions, self.t, self.horizon_slots) if self.forecast_upper is not None else None
 
 
 class Policy:
@@ -121,9 +125,13 @@ class MoveOnlyPolicy(Policy):
 class MigrationAwarePolicy(Policy):
     name = "migration-aware"
 
+    def __init__(self, forecast=None, name=None, risk_aware: bool = False):
+        super().__init__(forecast, name)
+        self.risk_aware = risk_aware
+
     def decide_all(self, ctx, jobs):
-        eng = self._engine(ctx, allow_wait=True)
-        return eng.decide(jobs, self._fc(ctx), ctx.now_h, mode="heuristic")
+        eng = self._engine(ctx, allow_wait=True, risk_aware=self.risk_aware)
+        return eng.decide(jobs, self._fc(ctx), ctx.now_h, mode="heuristic", ci_upper=ctx.upper() if self.risk_aware else None)
 
 
 class MilpPolicy(Policy):
