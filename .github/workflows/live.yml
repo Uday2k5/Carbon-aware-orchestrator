@@ -1,11 +1,11 @@
-# Hourly: fetch live grid data, advance the scheduler, publish the dashboard to GitHub Pages.
+# Every 20 minutes: fetch live grid data, advance the scheduler, publish the dashboard to GitHub Pages.
 # One-time setup: Settings -> Pages -> Deploy from a branch -> gh-pages / (root).
 # Optional secret ELECTRICITY_MAPS_TOKEN (Settings -> Secrets and variables -> Actions) switches India on.
 name: Live dashboard
 
 on:
   schedule:
-    - cron: "12 * * * *"
+    - cron: "7,27,47 * * * *"     # three tries an hour: GitHub delays or drops scheduled runs
   workflow_dispatch:
   push:
     branches: [main]

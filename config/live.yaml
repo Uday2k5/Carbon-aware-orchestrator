@@ -3,7 +3,7 @@
 site:
   title: "Carbon-Aware Orchestrator"
   repo_url: "https://github.com/Uday2k5/Carbon-aware-orchestrator"
-backfill_days: 60          # history pulled on first run (forecaster training data)
+backfill_days: 90          # history pulled on first run (forecaster training data)
 warm_start_hours: 72       # twin replays this much recorded history on first run
 capacity_cpu: 16
 arrival_rate: 0.7          # mean new batch/ML jobs per hour (Poisson)
@@ -11,18 +11,26 @@ max_active_jobs: 14
 
 locations:
   - {id: north-west-england, name: "North West England", country: GB, source: gb-regional, region_id: 3,
-     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/"}
+     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/",
+     weather_points: [[53.48, -2.24], [54.05, -3.50], [53.45, -3.40]]}
   - {id: london, name: "London", country: GB, source: gb-regional, region_id: 13,
-     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/"}
+     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/",
+     weather_points: [[51.50, -0.12], [51.60, 1.30], [52.30, 1.50]]}
   - {id: south-wales, name: "South Wales", country: GB, source: gb-regional, region_id: 7,
-     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/"}
+     operator: "National Grid ESO", url: "https://carbonintensity.org.uk/",
+     weather_points: [[51.48, -3.18], [51.68, -5.00], [51.60, -3.90]]}
   - {id: denmark-west, name: "Denmark West", country: DK, source: energidata, area: DK1,
-     operator: "Energinet", url: "https://www.energidataservice.dk/tso-electricity/CO2Emis"}
+     operator: "Energinet", url: "https://www.energidataservice.dk/tso-electricity/CO2Emis",
+     weather_points: [[55.50, 7.90], [56.15, 10.20], [57.00, 9.90]]}
   - {id: france, name: "France", country: FR, source: rte-eco2mix,
-     operator: "RTE éCO2mix", url: "https://www.rte-france.com/eco2mix"}
+     operator: "RTE éCO2mix", url: "https://www.rte-france.com/eco2mix",
+     weather_points: [[48.85, 2.35], [50.00, 2.80], [43.60, 3.00], [45.75, 4.85]]}
   - {id: india-north, name: "India North", country: IN, source: electricity-maps, zone: IN-NO,
      operator: "Electricity Maps", url: "https://app.electricitymaps.com/zone/IN-NO",
-     needs_key: ELECTRICITY_MAPS_TOKEN}
+     needs_key: ELECTRICITY_MAPS_TOKEN,
+     weather_points: [[28.60, 77.20], [26.90, 72.00], [26.85, 80.95]]}
+
+# weather_points: [lat, lon] spots whose day-ahead wind / sun / temperature forecasts feed the forecaster.
 
 # Illustrative round-trip times (ms) between locations; same location = latency_same.
 latency_same: 5

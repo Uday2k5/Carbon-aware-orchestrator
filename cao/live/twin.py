@@ -23,10 +23,12 @@ POLICIES = [
     ("ours-milp", "Payback-aware · 24 h MILP plan", lambda: MilpPolicy(time_limit_s=8)),
     ("greenest", "Always greenest region", lambda: GreenestRegionPolicy()),
     ("unaware", "Carbon-unaware", lambda: CarbonUnawarePolicy()),
+    ("ours-naive", "Payback-aware · naive forecast", lambda: MigrationAwarePolicy()),   # same rule, forecast = "same as now"
 ]
+NAIVE_FORECAST = {"ours-naive"}
 FEED_POLICY = "ours"
 COUNTERS = ("exec_g", "mig_g", "res_g", "migrations", "moves", "waits", "refuses", "holds", "done",
-            "deadline_missed", "sla_slots", "cap_rej", "solver_fallbacks")
+            "deadline_missed", "sla_slots", "cap_rej", "solver_fallbacks", "work_h")
 ISO = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -44,6 +46,42 @@ class DictForecast(ForecastProvider):
 
     def all(self, regions, t: int, horizon: int) -> Dict[str, np.ndarray]:
         return {r: self.forecast(r, t, horizon) for r in self.fc}   # includes stale regions jobs may sit in
+
+
+def service_jobs(cfg, enabled: List[str], now_h: float, skip=()) -> List[Job]:
+    """Always-on web services whose user location currently has data."""
+    out = []
+    for s in cfg.services:
+        if s["id"] not in skip and s["user"] in enabled:
+            out.append(Job(job_id=s["id"], kind="web-service", power_kw=float(s.get("power_kw", 0.08)), duration_h=1e6,
+                           state_gb=float(s.get("state_gb", 0.2)), origin=s["user"], release_h=now_h,
+                           user_region=s["user"], sla_rtt_ms=float(s["sla_ms"]), preemptible=False, cpu=1.0))
+    return out
+
+
+def sample_arrivals(hour: pd.Timestamp, now_h: float, enabled: List[str], rate: float) -> List[Job]:
+    """Jobs submitted in this hour. Seeded by the hour itself, so every policy and every re-run sees the same jobs."""
+    rng = np.random.default_rng(zlib.crc32(f"arrivals|{hour.strftime(ISO)}".encode()))
+    locs, jobs = sorted(enabled), []
+    for i in range(min(int(rng.poisson(rate)), 3)):
+        origin = locs[int(rng.integers(len(locs)))]
+        u = rng.random()
+        if u < 0.40:        # ML training: long, moderate state
+            dur = float(rng.uniform(4, 12))
+            jobs.append(Job(job_id=f"ml-{hour:%m%d%H}{chr(97 + i)}", kind="ml-training", power_kw=round(float(rng.uniform(0.15, 0.35)), 3),
+                            duration_h=round(dur, 2), state_gb=round(float(np.exp(rng.uniform(np.log(0.5), np.log(20.0)))), 2),
+                            origin=origin, release_h=now_h, deadline_h=round(now_h + dur * float(rng.uniform(1.5, 4.0)), 2), cpu=2.0))
+        elif u < 0.75:      # batch: short, light state
+            dur = float(rng.uniform(1, 4))
+            jobs.append(Job(job_id=f"bt-{hour:%m%d%H}{chr(97 + i)}", kind="batch-processing", power_kw=round(float(rng.uniform(0.05, 0.15)), 3),
+                            duration_h=round(dur, 2), state_gb=round(float(np.exp(rng.uniform(np.log(0.1), np.log(5.0)))), 2),
+                            origin=origin, release_h=now_h, deadline_h=round(now_h + dur * float(rng.uniform(2.0, 6.0)), 2), cpu=1.0))
+        else:               # data pipeline: short, heavy state (the case where moving rarely pays back)
+            dur = float(rng.uniform(0.5, 3))
+            jobs.append(Job(job_id=f"dp-{hour:%m%d%H}{chr(97 + i)}", kind="data-pipeline", power_kw=round(float(rng.uniform(0.10, 0.25)), 3),
+                            duration_h=round(dur, 2), state_gb=round(float(np.exp(rng.uniform(np.log(20.0), np.log(120.0)))), 1),
+                            origin=origin, release_h=now_h, deadline_h=round(now_h + dur * float(rng.uniform(2.0, 5.0)), 2), cpu=1.0))
+    return jobs
 
 
 class LiveTwin:
@@ -85,40 +123,18 @@ class LiveTwin:
             P["jobs"].append(copy.deepcopy(job))
 
     def _spawn(self, hour: pd.Timestamp, now_h: float, enabled: List[str]) -> None:
-        for s in self.cfg.services:
-            if s["id"] not in self.services_created and s["user"] in enabled:
-                self.services_created.append(s["id"])
-                self._add(Job(job_id=s["id"], kind="web-service", power_kw=float(s.get("power_kw", 0.08)), duration_h=1e6,
-                              state_gb=float(s.get("state_gb", 0.2)), origin=s["user"], release_h=now_h,
-                              user_region=s["user"], sla_rtt_ms=float(s["sla_ms"]), preemptible=False, cpu=1.0))
+        for job in service_jobs(self.cfg, enabled, now_h, skip=self.services_created):
+            self.services_created.append(job.job_id)
+            self._add(job)
         active = sum(1 for j in self.pol[FEED_POLICY]["jobs"] if not j.is_always_on)
         if active >= self.cfg.max_active_jobs or not enabled:
             return
-        rng = np.random.default_rng(zlib.crc32(f"arrivals|{hour.strftime(ISO)}".encode()))
-        locs = sorted(enabled)
-        for i in range(min(int(rng.poisson(self.cfg.arrival_rate)), 3)):
-            origin = locs[int(rng.integers(len(locs)))]
-            u = rng.random()
-            if u < 0.40:        # ML training: long, moderate state
-                dur = float(rng.uniform(4, 12))
-                job = Job(job_id=f"ml-{hour:%m%d%H}{chr(97 + i)}", kind="ml-training", power_kw=round(float(rng.uniform(0.15, 0.35)), 3),
-                          duration_h=round(dur, 2), state_gb=round(float(np.exp(rng.uniform(np.log(0.5), np.log(20.0)))), 2),
-                          origin=origin, release_h=now_h, deadline_h=round(now_h + dur * float(rng.uniform(1.5, 4.0)), 2), cpu=2.0)
-            elif u < 0.75:      # batch: short, light state
-                dur = float(rng.uniform(1, 4))
-                job = Job(job_id=f"bt-{hour:%m%d%H}{chr(97 + i)}", kind="batch-processing", power_kw=round(float(rng.uniform(0.05, 0.15)), 3),
-                          duration_h=round(dur, 2), state_gb=round(float(np.exp(rng.uniform(np.log(0.1), np.log(5.0)))), 2),
-                          origin=origin, release_h=now_h, deadline_h=round(now_h + dur * float(rng.uniform(2.0, 6.0)), 2), cpu=1.0)
-            else:               # data pipeline: short, heavy state (the case where moving rarely pays back)
-                dur = float(rng.uniform(0.5, 3))
-                job = Job(job_id=f"dp-{hour:%m%d%H}{chr(97 + i)}", kind="data-pipeline", power_kw=round(float(rng.uniform(0.10, 0.25)), 3),
-                          duration_h=round(dur, 2), state_gb=round(float(np.exp(rng.uniform(np.log(20.0), np.log(120.0)))), 1),
-                          origin=origin, release_h=now_h, deadline_h=round(now_h + dur * float(rng.uniform(2.0, 5.0)), 2), cpu=1.0)
+        for job in sample_arrivals(hour, now_h, enabled, self.cfg.arrival_rate):
             self._add(job)
 
     # -------------------------------------------------------------------- advance
     def advance(self, hour: pd.Timestamp, ci_now: Dict[str, float], forecasts: Dict[str, np.ndarray],
-                enabled: List[str]) -> List[dict]:
+                enabled: List[str], naive_forecasts: Optional[Dict[str, np.ndarray]] = None) -> List[dict]:
         """Process one completed hour. Returns new decision-feed rows (MOVE / WAIT / REFUSE of our policy)."""
         now_h = (hour - self.epoch) / pd.Timedelta(hours=1)
         self._spawn(hour, now_h, enabled)
@@ -128,8 +144,9 @@ class LiveTwin:
             P = self.pol[pid]
             active = [j for j in P["jobs"] if not j.done and j.release_h <= now_h + 1e-9 and j.region in ci_now]
             if active:
+                fc = naive_forecasts if (pid in NAIVE_FORECAST and naive_forecasts is not None) else forecasts
                 ctx = SimContext(t=0, now_h=now_h, slot_h=1.0, regions=list(enabled), ci_now=ci_now,
-                                 forecast=DictForecast(forecasts), cost_model=self.cm, latency_ms=self.cfg.latency_ms,
+                                 forecast=DictForecast(fc), cost_model=self.cm, latency_ms=self.cfg.latency_ms,
                                  capacity=cap, load=dict(P["load"]), horizon_slots=24, evaluation_horizon_h=24.0)
                 policy = make()
                 try:
@@ -149,6 +166,7 @@ class LiveTwin:
                 P["holds"] += out.counts[ActionType.HOLD]
                 P["sla_slots"] += out.sla_slots
                 P["cap_rej"] += out.cap_rej
+                P["work_h"] += out.work_h
                 P["load"] = out.load
                 if pid == FEED_POLICY:
                     self.decisions_total += len(active)
@@ -205,7 +223,7 @@ class LiveTwin:
                          "migration_g": round(P["mig_g"] + P["res_g"], 1), "migrations": P["migrations"], "refuses": P["refuses"],
                          "waits": P["waits"], "done": P["done"], "deadline_missed": P["deadline_missed"],
                          "sla_violation_hours": P["sla_slots"], "active": len(P["jobs"]),
-                         "solver_fallbacks": P["solver_fallbacks"]})
+                         "solver_fallbacks": P["solver_fallbacks"], "job_hours": round(P["work_h"], 1)})
         jobs = []
         for j in self.pol[FEED_POLICY]["jobs"]:
             status = "running" if j.running else ("suspended" if j.started else "pending")

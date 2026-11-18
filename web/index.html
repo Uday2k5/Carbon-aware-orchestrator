@@ -18,7 +18,7 @@
     <span>Carbon Payback <b>Live</b></span>
   </a>
   <nav class="bar-nav" aria-label="Sections">
-    <a href="#grid">Grid</a><a href="#forecast">Forecast</a><a href="#scheduler">Scheduler</a><a href="#score">Scoreboard</a><a href="#calc">Calculator</a><a href="#about">Method</a>
+    <a href="#grid">Grid</a><a href="#forecast">Forecast</a><a href="#model">Model</a><a href="#scheduler">Scheduler</a><a href="#score">Scoreboard</a><a href="#calc">Calculator</a><a href="#about">Method</a>
   </nav>
   <div class="bar-right">
     <span class="pill" id="status" title="When the grid data was last refreshed"><i class="dot"></i><span id="status-text">loading…</span><span id="status-short"></span></span>
@@ -45,8 +45,16 @@
   <section id="forecast" class="sec">
     <div class="sec-head"><h2>Day-ahead forecast</h2><p id="fc-sub">Last 72 hours and the next 24.</p></div>
     <div class="two">
-      <div class="panel"><div class="chart tall"><canvas id="fc-chart" aria-label="History and forecast of carbon intensity"></canvas></div><div class="legend" id="fc-legend"></div></div>
+      <div class="panel"><div class="chart tall"><canvas id="fc-chart" aria-label="History and forecast of carbon intensity"></canvas></div><div class="legend" id="fc-legend"></div><div class="why" id="why"></div></div>
       <div class="panel" id="acc"></div>
+    </div>
+  </section>
+
+  <section id="model" class="sec">
+    <div class="sec-head"><h2>The model behind the forecast</h2><p id="model-sub">Trained by this project, retrained every day on the data it collects.</p></div>
+    <div class="two">
+      <div class="panel" id="model-card"></div>
+      <div class="panel" id="model-side"></div>
     </div>
   </section>
 
@@ -61,7 +69,7 @@
   <section id="score" class="sec">
     <div class="sec-head"><h2>Scoreboard</h2><p id="score-sub">Cumulative emissions of the same jobs under each policy.</p></div>
     <div class="stack">
-      <div class="panel"><div class="chart tall"><canvas id="score-chart" aria-label="Cumulative emissions per policy"></canvas></div></div>
+      <div class="panel"><div class="chart tall"><canvas id="score-chart" aria-label="Cumulative emissions per policy"></canvas></div><div class="legend" id="score-legend"></div></div>
       <div class="panel"><div class="scroll"><table class="tbl" id="score-table"></table></div><p class="note" id="score-note"></p></div>
     </div>
   </section>

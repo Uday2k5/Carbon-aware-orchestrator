@@ -1,24 +1,20 @@
-"""Forecasting on the live hourly store.
-
-Candidates per location: boosted trees on the change from now ("gbm"), seasonal-naive,
-persistence, and their average ("blend").  Once a day a walk-forward backtest scores every
-candidate on each of the last 14 days (model refit on data before the day), picks for each
-day the candidate that did best over the *previous* week, and reports that selector's
-out-of-sample error.  The candidate that did best over the last week serves today's forecast.
+"""Forecasting on the live store: one weather-driven model per grid, honest fallbacks while a grid
+has too little history, a daily walk-forward backtest, and a study of what the forecast is worth
+to the scheduler (naive forecast vs our model vs perfect foresight on the same week of real data).
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
-from ..forecast.models import GradientBoostingForecaster, SeasonalNaiveForecaster
+from ..forecast.models import SeasonalNaiveForecaster
+from ..forecast.weather_blend import MIN_HOURS, WeatherBlendForecaster
 
-MIN_GB_HOURS = 240      # 10 days of hourly history before the boosted model is used
 MIN_SEASONAL_HOURS = 48
-CANDIDATES = ("gbm", "seasonal", "persistence", "blend")
 ISO = "%Y-%m-%dT%H:%M:%SZ"
+H1 = pd.Timedelta(hours=1)
 
 
 def contiguous_tail(series: pd.Series) -> pd.Series:
@@ -26,96 +22,160 @@ def contiguous_tail(series: pd.Series) -> pd.Series:
     s = series.dropna()
     if s.empty:
         return s
-    gaps = s.index.to_series().diff() > pd.Timedelta(hours=1)
+    gaps = s.index.to_series().diff() > H1
     if gaps.any():
         s = s[s.index >= gaps[gaps].index[-1]]
     return s
 
 
-def _gbm() -> GradientBoostingForecaster:
-    return GradientBoostingForecaster(max_horizon=24, holdout_frac=0.0, target="delta", params={"max_iter": 200})
+def _fit_one(series: pd.Series, wx: Optional[pd.DataFrame]) -> Optional[WeatherBlendForecaster]:
+    if len(series) < MIN_HOURS:
+        return None
+    try:
+        return WeatherBlendForecaster().fit(series, wx)
+    except Exception:
+        return None
 
 
-def _candidates(model, hist: pd.Series, horizon: int = 24) -> Dict[str, np.ndarray]:
-    v = hist.values.astype(float)
-    out = {"persistence": np.full(horizon, v[-1])}
-    out["seasonal"] = np.asarray(SeasonalNaiveForecaster(24).predict(v, horizon), float) if len(v) >= MIN_SEASONAL_HOURS else out["persistence"]
-    if model is not None and len(v) >= 170:
-        out["gbm"] = np.asarray(model.predict(hist, horizon), float)
-        out["blend"] = (out["gbm"] + out["seasonal"] + out["persistence"]) / 3.0
+def fit_models(wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], upto: pd.Timestamp) -> Dict[str, Optional[WeatherBlendForecaster]]:
+    """One model per location on data up to and including `upto` (None while history is too short)."""
+    out = {}
+    for loc in wide.columns:
+        s = contiguous_tail(wide[loc][wide.index <= upto])
+        if len(s):
+            out[loc] = _fit_one(s, weather.get(loc))
     return out
 
 
-def fit_models(wide: pd.DataFrame, upto: pd.Timestamp) -> Dict[str, Optional[GradientBoostingForecaster]]:
-    """One boosted model per location on data up to and including `upto` (None when history is short)."""
-    models = {}
-    for loc in wide.columns:
-        s = contiguous_tail(wide[loc][wide.index <= upto])
-        if len(s) >= MIN_GB_HOURS:
-            models[loc] = _gbm().fit(s)
-        elif len(s) >= 1:
-            models[loc] = None
-    return models
-
-
-def predict(models: Dict[str, object], wide: pd.DataFrame, at: pd.Timestamp, selection: Optional[Dict[str, str]] = None,
-            bands: Optional[Dict[str, list]] = None, horizon: int = 24) -> Dict[str, dict]:
-    """Forecast hours at+1 .. at+horizon per location with the selected candidate (default: gbm when available)."""
+def predict(models: Dict[str, object], wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], at: pd.Timestamp,
+            horizon: int = 24, explain: bool = True) -> Dict[str, dict]:
+    """Forecast hours at+1 .. at+horizon for every location with data at `at`."""
     out = {}
     for loc, m in models.items():
         s = contiguous_tail(wide[loc][wide.index <= at])
         if s.empty:
             continue
-        c = _candidates(m, s, horizon)
-        name = (selection or {}).get(loc) or ("gbm" if "gbm" in c else ("seasonal" if len(s) >= MIN_SEASONAL_HOURS else "persistence"))
-        if name not in c:
-            name = "seasonal" if len(s) >= MIN_SEASONAL_HOURS else "persistence"
-        p = c[name]
-        band = np.asarray(bands[loc], float) if bands and loc in bands and bands[loc] is not None else None
-        out[loc] = {"model": name, "p50": p, "lo": None if band is None else np.maximum(p - band, 0.0),
-                    "hi": None if band is None else p + band}
+        if m is not None and len(s) >= 200:
+            parts = m.predict_parts(s, weather.get(loc), horizon)
+            out[loc] = {"model": "weather-trees" if m.diag.get("has_weather") else "trees", "p50": parts["p50"], "lo": parts["lo"],
+                        "hi": parts["hi"], "weather_effect": parts["weather_effect"] if explain else None}
+        elif len(s) >= MIN_SEASONAL_HOURS:
+            out[loc] = {"model": "seasonal", "p50": np.asarray(SeasonalNaiveForecaster(24).predict(s.values, horizon), float),
+                        "lo": None, "hi": None, "weather_effect": None}
+        else:
+            out[loc] = {"model": "persistence", "p50": np.full(horizon, float(s.values[-1])), "lo": None, "hi": None, "weather_effect": None}
     return out
 
 
-def daily_backtest(wide: pd.DataFrame, last_complete: pd.Timestamp, days: int = 14, eval_days: int = 7) -> Dict[str, dict]:
+def daily_backtest(wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], last_complete: pd.Timestamp, days: int = 14,
+                   refit_days: int = 2, keep_models: bool = False):
+    """Walk-forward test on the last `days` complete UTC days.
+
+    A model is refit every `refit_days` on data strictly before its block, then asked for a 24 h
+    forecast four times a day.  Returns per-location errors for ours and both naive baselines,
+    error by hours-ahead, and the last scored day as a curve.  With keep_models the per-block
+    models are returned too (used by the forecast-value study).
+    """
     res: Dict[str, dict] = {}
-    day0 = (last_complete + pd.Timedelta(hours=1)).floor("D")       # start of the UTC day in progress
+    blocks: Dict[str, list] = {}
+    day0 = (last_complete + H1).floor("D")
     for loc in wide.columns:
         s_all = wide[loc]
-        per_day = []                                                # dicts: day, y, preds{c}
-        for k in range(days, 0, -1):
-            d = day0 - pd.Timedelta(days=k)
-            target = s_all[(s_all.index >= d) & (s_all.index < d + pd.Timedelta(days=1))]
-            hist = contiguous_tail(s_all[s_all.index < d])
-            if len(target.dropna()) < 24 or len(hist) < MIN_GB_HOURS:
+        wx = weather.get(loc)
+        e_ours, e_pers, e_seas = [], [], []          # each entry: array(24) of abs errors
+        last_curve = None
+        n_days_scored = set()
+        for start_k in range(days, 0, -refit_days):
+            b_start = day0 - pd.Timedelta(days=start_k)
+            hist0 = contiguous_tail(s_all[s_all.index < b_start])
+            m = _fit_one(hist0, wx)
+            if m is None:
                 continue
-            preds = _candidates(_gbm().fit(hist), hist, 24)
-            per_day.append({"day": d, "idx": target.index, "y": target.values.astype(float), "preds": preds})
-        if len(per_day) < 2:
+            blocks.setdefault(loc, []).append((b_start, min(b_start + pd.Timedelta(days=refit_days), day0), m))
+            for k in range(start_k, max(start_k - refit_days, 0), -1):
+                d = day0 - pd.Timedelta(days=k)
+                for off in (0, 6, 12, 18):
+                    origin = d + pd.Timedelta(hours=off) - H1
+                    tgt = pd.date_range(origin + H1, periods=24, freq="1h")
+                    y = s_all.reindex(tgt).values.astype(float)
+                    hist = contiguous_tail(s_all[s_all.index <= origin])
+                    if np.isnan(y).any() or len(hist) < MIN_HOURS or hist.index[-1] != origin:
+                        continue
+                    parts = m.predict_parts(hist, wx, 24)
+                    e_ours.append(np.abs(parts["p50"] - y)); e_pers.append(np.abs(parts["persistence"] - y)); e_seas.append(np.abs(parts["seasonal"] - y))
+                    n_days_scored.add(d)
+                    if off == 0:
+                        last_curve = {"day": d.strftime("%Y-%m-%d"), "ts": [t.strftime(ISO) for t in tgt],
+                                      "actual": [round(float(v), 1) for v in y], "ours": [round(float(v), 1) for v in parts["p50"]],
+                                      "persistence": [round(float(v), 1) for v in parts["persistence"]]}
+        if not e_ours:
             continue
-        n = len(per_day)
-        err = {c: np.array([np.abs(pd_["preds"][c] - pd_["y"]).mean() for pd_ in per_day]) for c in CANDIDATES}
-        first_eval = max(1, n - eval_days)
-        chosen, ours = [], []
-        for i in range(first_eval, n):
-            prior = slice(max(0, i - 7), i)
-            pick = min(CANDIDATES, key=lambda c: err[c][prior].mean())
-            chosen.append(pick)
-            ours.append(err[pick][i])
-        today = min(CANDIDATES, key=lambda c: err[c][max(0, n - 7):].mean())
-        abs_err = np.array([np.abs(pd_["preds"][today] - pd_["y"]) for pd_ in per_day])      # days x 24
-        band = np.quantile(abs_err, 0.8, axis=0)
-        band = np.convolve(np.pad(band, 1, mode="edge"), np.ones(3) / 3, mode="valid")
-        last = per_day[-1]
+        eo, ep, es = np.array(e_ours), np.array(e_pers), np.array(e_seas)
+        naive = min(float(ep.mean()), float(es.mean()))
         res[loc] = {
-            "n_days": n - first_eval, "selected": today, "picked_per_day": chosen,
-            "mae_ours": round(float(np.mean(ours)), 1),
-            **{f"mae_{c}": round(float(err[c][first_eval:].mean()), 1) for c in CANDIDATES},
-            "band": [round(float(b), 1) for b in band],
-            "last_day": {"day": last["day"].strftime("%Y-%m-%d"), "model": chosen[-1],
-                         "ts": [t.strftime(ISO) for t in last["idx"]],
-                         "actual": [round(float(v), 1) for v in last["y"]],
-                         "ours": [round(float(v), 1) for v in last["preds"][chosen[-1]]],
-                         "persistence": [round(float(v), 1) for v in last["preds"]["persistence"]]},
+            "n_days": len(n_days_scored), "n_forecasts": int(len(eo)),
+            "mae_ours": round(float(eo.mean()), 1), "mae_persistence": round(float(ep.mean()), 1), "mae_seasonal": round(float(es.mean()), 1),
+            "skill_pct": round((1 - float(eo.mean()) / naive) * 100, 1) if naive > 0 else 0.0,
+            "by_horizon": {"ours": [round(float(v), 1) for v in eo.mean(axis=0)], "persistence": [round(float(v), 1) for v in ep.mean(axis=0)]},
+            "last_day": last_curve,
         }
-    return res
+    return (res, blocks) if keep_models else res
+
+
+def forecast_value_study(cfg, cost_model, wide: pd.DataFrame, weather: Dict[str, pd.DataFrame], blocks: Dict[str, list],
+                         last_complete: pd.Timestamp, days: int = 7, drain_days: int = 2) -> Optional[dict]:
+    """What is the forecast worth to the scheduler?  Same week of real grid data, same jobs, same
+    payback-aware policy, three forecasts: naive (same as now), our model (each hour forecast by the
+    model that existed then), perfect foresight.  Jobs arrive for `days` days and the run continues
+    `drain_days` more with no new jobs, so every variant finishes the same work before totals are compared."""
+    from ..simulator.forecast_providers import ForecastProvider, OracleForecast, PersistenceForecast
+    from ..simulator.policies import CarbonUnawarePolicy, MigrationAwarePolicy
+    from ..simulator.sim import run_simulation
+    from .twin import sample_arrivals, service_jobs
+
+    day0 = (last_complete + H1).floor("D")
+    hours = pd.date_range(day0 - pd.Timedelta(days=days + drain_days), day0 - H1, freq="1h")
+    carried = wide.ffill()
+    locs = [c for c in wide.columns if c in blocks and carried[c].reindex(hours).notna().all()]
+    if len(locs) < 2:
+        return None
+    traces = {c: carried[c].reindex(hours).values.astype(float) for c in locs}
+    table: Dict[str, List[np.ndarray]] = {c: [] for c in locs}
+    for c in locs:
+        s_all = wide[c]
+        for h in hours:
+            m = next((mm for (b0, b1, mm) in blocks[c] if b0 <= h < b1), None)
+            hist = contiguous_tail(s_all[s_all.index <= h])
+            now_v = float(carried[c].loc[h])
+            if m is None or len(hist) < MIN_HOURS or hist.index[-1] != h:
+                table[c].append(np.full(24, now_v))
+            else:
+                table[c].append(np.concatenate([[now_v], m.predict(hist, weather.get(c), 24)[:23]]))
+
+    class TableForecast(ForecastProvider):
+        name = "our model"
+
+        def forecast(self, region, t, horizon):
+            return table[region][min(t, len(hours) - 1)][:horizon]
+
+    jobs = service_jobs(cfg, locs, 0.0)
+    for i, h in enumerate(hours[: days * 24]):
+        jobs += sample_arrivals(h, float(i), locs, cfg.arrival_rate)
+    lat = {a: {b: cfg.latency_ms[a][b] for b in locs} for a in locs}
+    cap = {c: cfg.capacity_cpu for c in locs}
+    run = lambda pol, fc: run_simulation(traces, jobs, pol, cost_model, lat, cap, forecast=fc)
+    naive = run(MigrationAwarePolicy(), PersistenceForecast(traces))
+    model = run(MigrationAwarePolicy(), TableForecast())
+    perfect = run(MigrationAwarePolicy(), OracleForecast(traces))
+    unaware = run(CarbonUnawarePolicy(), OracleForecast(traces))
+    gain = naive.total_g - perfect.total_g
+    return {
+        "days": days, "from": hours[0].strftime(ISO), "to": hours[days * 24 - 1].strftime(ISO), "jobs": len(jobs), "grids": locs,
+        "unfinished": {"naive": naive.unfinished, "model": model.unfinished, "perfect": perfect.unfinished},
+        "naive_g": round(naive.total_g, 1), "model_g": round(model.total_g, 1), "perfect_g": round(perfect.total_g, 1),
+        "unaware_g": round(unaware.total_g, 1),
+        "saved_by_model_g": round(naive.total_g - model.total_g, 1),
+        "captured_pct": round((naive.total_g - model.total_g) / gain * 100, 1) if gain > 1e-6 else None,
+        "waits": {"naive": naive.waits, "model": model.waits, "perfect": perfect.waits},
+        "deadline_missed": {"naive": naive.deadline_violations, "model": model.deadline_violations, "perfect": perfect.deadline_violations},
+    }

@@ -5,9 +5,10 @@ const $ = (s, el = document) => el.querySelector(s);
 const NS = "http://www.w3.org/2000/svg";
 const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const KIND = { "ml-training": ["ML training", "--s1"], "batch-processing": ["batch", "--s3"], "data-pipeline": ["data-heavy", "--s2"], "web-service": ["web service", "--s7"] };
-const POLICY_SLOT = { "ours-milp": "--s1", greenest: "--s2", ours: "--s3", unaware: "--s4" };
-const POLICY_ORDER = ["ours-milp", "greenest", "ours", "unaware"];      // palette slot order
-const TABLE_ORDER = ["ours", "ours-milp", "greenest", "unaware"];
+const POLICY_SLOT = { "ours-milp": "--s1", greenest: "--s2", ours: "--s3", unaware: "--s4", "ours-naive": "--s5" };
+const POLICY_ORDER = ["ours-milp", "greenest", "ours", "unaware", "ours-naive"];      // palette slot order
+const TABLE_ORDER = ["ours", "ours-naive", "ours-milp", "greenest", "unaware"];
+const SHORT = { ours: "Ours", "ours-milp": "Ours · 24 h plan", greenest: "Always greenest", unaware: "Carbon-unaware", "ours-naive": "Ours · naive forecast" };
 let LIVE = null, selected = null, ciLo = 0, ciHi = 400;
 const charts = {};
 const jobEls = new Map();
@@ -44,6 +45,8 @@ async function load() {
 }
 
 function renderAll() { renderStatus(); renderHero(); renderCards(); renderForecast(); renderStage(); renderFeed(); renderScore(); buildCalc(); renderAbout(); }
+const acc = (id) => ((LIVE.accuracy || {}).per_location || {})[id];
+const card = (id) => (((LIVE.models || {}).forecaster || {}).per_location || {})[id];
 
 /* ------------------------------------------------------------------ status + hero */
 function renderStatus() {
@@ -57,6 +60,12 @@ function renderStatus() {
   $("#foot-text").textContent = `Last pipeline run ${fmtT(LIVE.meta.generated_at)} UTC · run #${LIVE.meta.ticks} · times shown in UTC · refreshes every hour`;
 }
 
+function skillStat() {
+  const sk = Object.values((LIVE.accuracy || {}).per_location || {}).map((a) => a.skill_pct).filter((v) => v != null);
+  if (!sk.length) return ["", num(LIVE.twin.decisions_total), "placement decisions evaluated"];
+  const avg = sk.reduce((a, b) => a + b, 0) / sk.length;
+  return ["", `${num(avg)}%`, `lower forecast error than the best naive method, average of ${sk.length} grids`];
+}
 function renderHero() {
   const o = pol("ours"), u = pol("unaware"), g = pol("greenest"), tw = LIVE.twin;
   const cut = u.total_g > 0 ? Math.round((1 - o.total_g / u.total_g) * 100) : 0;
@@ -64,7 +73,7 @@ function renderHero() {
     ["lead", fmtG(u.total_g - o.total_g) + " CO₂", `avoided against running every job where it was submitted · ${cut}% lower · ${tw.hours} h on live grid data`],
     ["", fmtG(g.total_g - o.total_g), "less than always chasing the greenest grid"],
     ["", num(o.refuses), "times a greener grid was refused"],
-    ["", num(tw.decisions_total), "placement decisions evaluated"],
+    skillStat(),
     ["", `${o.migrations} vs ${g.migrations}`, "migrations: ours vs greenest-chaser"],
   ];
   $("#hero-stats").innerHTML = stats.map(([c, v, l]) => `<div class="stat ${c}"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
@@ -135,30 +144,109 @@ function renderForecast() {
   $("#fc-legend").innerHTML = `<span><i style="background:var(--ink-2)"></i>measured</span><span><i style="background:var(--s1)"></i>our forecast (${esc(modelName(l.forecast_model))})</span>` +
     (hasBand ? `<span><i style="background:${alpha(s1, 0.3)};height:10px"></i>80% band from recent errors</span>` : "") +
     (off.size ? `<span><i class="dash" style="color:var(--s2)"></i>operator's own forecast</span>` : "");
-  renderAccuracy(l);
+  renderWhy(l); renderAccuracy(l); renderModel(l);
 }
-const modelName = (m) => ({ gbm: "boosted trees", blend: "blend of three", seasonal: "seasonal", persistence: "persistence" }[m] || m || "–");
+
+function renderWhy(l) {
+  const box = $("#why"), eff = l.weather_effect, wx = l.weather || [], fc = l.forecast || [];
+  if (!eff || !wx.length || !fc.length) { box.innerHTML = l.forecast_model && l.forecast_model !== "weather-trees" ? `<p>This grid has too little history for the trained model yet, so the forecast is "${esc(modelName(l.forecast_model))}".</p>` : ""; return; }
+  let k = 0; eff.forEach((v, i) => { if (Math.abs(v) > Math.abs(eff[k])) k = i; });
+  const fut = wx.slice(24), windNow = (wx[23] || [])[1], windThen = (fut[k] || [])[1], when = fmtT(fc[k][0]);
+  const peak = fut.reduce((a, b) => (b[1] != null && (a == null || b[1] > a[1]) ? b : a), null);
+  const line = Math.abs(eff[k]) < 3
+    ? `Weather is forecast to stay close to now, so the forecast mostly follows the grid's usual daily shape.`
+    : `Forecast weather <b>${eff[k] < 0 ? "lowers" : "raises"}</b> the prediction by up to <b>${num(Math.abs(eff[k]))} gCO₂/kWh</b> around ${when}: wind ${num(windNow, 1)} → ${num(windThen, 1)} m/s.`;
+  box.innerHTML = `<p><span class="badge">why</span> ${line}</p><div class="chart mini" style="height:110px"><canvas id="wx-chart" aria-label="Wind forecast"></canvas></div>
+    <div class="legend"><span><i style="background:var(--s3)"></i>wind at 100 m, m/s: last 24 h and day-ahead forecast${peak ? ` (peak ${num(peak[1], 1)} m/s at ${fmtT(peak[0])})` : ""}</span></div>`;
+  const base = chartBase(); base.scales.x.ticks.maxTicksLimit = 6; base.scales.y.ticks = { maxTicksLimit: 3 };
+  base.plugins.tooltip.callbacks = { label: (it) => ` wind: ${num(it.parsed.y, 1)} m/s` };
+  const nowLine = { id: "nowx", afterDatasetsDraw(c) { const x = c.scales.x.getPixelForValue(23), a = c.chartArea, g = c.ctx; g.save(); g.strokeStyle = css("--muted"); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(x, a.top); g.lineTo(x, a.bottom); g.stroke(); g.restore(); } };
+  mk("wx-chart", { type: "line", data: { labels: wx.map((r) => fmtT(r[0])), datasets: [{ label: "wind", data: wx.map((r) => r[1]), borderColor: css("--s3"), backgroundColor: alpha(css("--s3"), 0.12), fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3 }] }, options: base, plugins: [nowLine] });
+}
+const modelName = (m) => ({ "weather-trees": "weather-driven trees", trees: "boosted trees", seasonal: "same hour yesterday", persistence: "same as now" }[m] || m || "–");
 
 function renderAccuracy(l) {
-  const a = (LIVE.accuracy.per_location || {})[l.id], box = $("#acc");
-  if (!a) { box.innerHTML = `<h3>Forecast accuracy</h3><p class="note">Needs ten days of history for ${esc(l.name)} before it can be scored. ${l.hours_of_history || 0} hours collected so far.</p>`; if (charts["acc-chart"]) { charts["acc-chart"].destroy(); delete charts["acc-chart"]; } return; }
-  const tiles = [["our selector", a.mae_ours], ["persistence", a.mae_persistence], ["same hour yesterday", a.mae_seasonal]];
-  const best = Math.min(...tiles.map((t) => t[1]));
-  const d = a.last_day;
-  box.innerHTML = `<h3>Forecast accuracy · ${esc(l.name)}</h3>
+  const a = acc(l.id), box = $("#acc");
+  ["acc-chart", "hz-chart"].forEach((id) => { if (charts[id]) { charts[id].destroy(); delete charts[id]; } });
+  if (!a) { box.innerHTML = `<h3>Forecast accuracy</h3><p class="note">Needs four weeks of history for ${esc(l.name)} before the trained model can be scored. ${l.hours_of_history || 0} hours collected so far.</p>`; return; }
+  const tiles = [["our model", a.mae_ours], ["same as now", a.mae_persistence], ["same hour yesterday", a.mae_seasonal]];
+  const best = Math.min(...tiles.map((t) => t[1])), d = a.last_day;
+  box.innerHTML = `<h3>Forecast accuracy · ${esc(l.name)} <span class="badge ${a.skill_pct > 0 ? "" : "flat"}" style="margin-left:6px">${a.skill_pct > 0 ? num(a.skill_pct) + "% better than best naive" : "level with naive"}</span></h3>
     <div class="acc-grid">${tiles.map(([n, v]) => `<div class="tile ${v === best ? "best" : ""}"><div class="v">${num(v, 1)}</div><div class="l">${esc(n)}</div></div>`).join("")}</div>
-    <p class="note">Mean absolute error in gCO₂/kWh over the last ${a.n_days} days, 24 hours ahead, scored out of sample. Lower is better.</p>
-    <div class="kv"><span>Model serving today</span><span>${esc(modelName(a.selected))}</span></div>
-    <div class="kv"><span>Boosted trees alone</span><span>${num(a.mae_gbm, 1)}</span></div>
-    ${a.mae_official_last_day != null ? `<div class="kv"><span>${esc(d.day)}: ours vs operator</span><span>${num(a.mae_ours_last_day, 1)} vs ${num(a.mae_official_last_day, 1)}</span></div>` : ""}
-    <h3 style="margin-top:14px">${esc(d.day)}: forecast against what happened</h3>
+    <p class="note">Mean error in gCO₂/kWh, 24 hours ahead. ${a.n_forecasts} forecasts over the last ${a.n_days} days, each made by a model that had not seen that day. Lower is better.</p>
+    ${a.mae_official_last_day != null ? `<div class="kv"><span>${esc(d.day)}: ours vs operator's forecast</span><span>${num(a.mae_ours_last_day, 1)} vs ${num(a.mae_official_last_day, 1)}</span></div>` : ""}
+    <h3 class="gap">Error by hours ahead</h3>
+    <div class="chart mini"><canvas id="hz-chart" aria-label="Forecast error by hours ahead"></canvas></div>
+    <div class="legend"><span><i style="background:var(--s1)"></i>our model</span><span><i class="dash" style="color:var(--ink-2)"></i>same as now</span></div>
+    ${d ? `<h3 class="gap">${esc(d.day)}: forecast against what happened</h3>
     <div class="chart mini"><canvas id="acc-chart" aria-label="Forecast against actual for the last scored day"></canvas></div>
-    <div class="legend"><span><i style="background:var(--ink-2)"></i>actual</span><span><i style="background:var(--s1)"></i>our forecast</span></div>`;
+    <div class="legend"><span><i style="background:var(--ink-2)"></i>actual</span><span><i style="background:var(--s1)"></i>our forecast, made the evening before</span></div>` : ""}`;
+  const hz = chartBase(); hz.scales.x.ticks.maxTicksLimit = 6; hz.scales.x.title = { display: true, text: "hours ahead" };
+  hz.plugins.tooltip.callbacks = { title: (it) => `${it[0].label} h ahead`, label: (it) => ` ${it.dataset.label}: ${num(it.parsed.y, 1)} gCO₂/kWh` };
+  mk("hz-chart", { type: "line", data: { labels: a.by_horizon.ours.map((_, i) => i + 1), datasets: [
+    { label: "our model", data: a.by_horizon.ours, borderColor: css("--s1"), borderWidth: 2, pointRadius: 0, tension: 0.25 },
+    { label: "same as now", data: a.by_horizon.persistence, borderColor: css("--ink-2"), borderWidth: 2, borderDash: [5, 4], pointRadius: 0, tension: 0.25 }] }, options: hz });
+  if (!d) return;
   const base = chartBase(); base.scales.x.ticks.maxTicksLimit = 5;
   base.plugins.tooltip.callbacks = { label: (it) => ` ${it.dataset.label}: ${num(it.parsed.y)} gCO₂/kWh` };
   mk("acc-chart", { type: "line", data: { labels: d.ts.map((t) => hhmm(new Date(t))), datasets: [
     { label: "actual", data: d.actual, borderColor: css("--ink-2"), borderWidth: 2, pointRadius: 0, tension: 0.25 },
     { label: "our forecast", data: d.ours, borderColor: css("--s1"), borderWidth: 2, pointRadius: 0, tension: 0.25 }] }, options: base });
+}
+
+/* ------------------------------------------------------------------ the model */
+function barRow(label, value, max, color, unit = "") {
+  return `<div class="bar-row"><span>${esc(label)}</span><div class="track"><div class="fill" style="width:${Math.max(1.5, value / Math.max(max, 1e-9) * 100)}%;background:${color}"></div></div><span>${num(value, value < 100 ? 1 : 0)}${unit}</span></div>`;
+}
+function renderModel(l) {
+  const f = (LIVE.models || {}).forecaster, c = card(l.id), a = acc(l.id), left = $("#model-card"), right = $("#model-side");
+  if (!f) { left.innerHTML = right.innerHTML = ""; return; }
+  $("#model-sub").textContent = `Trained by this project and retrained on every run. Last trained ${fmtT(f.retrained)} UTC. Showing ${l.name}.`;
+  if (!c) {
+    left.innerHTML = `<h3>${esc(f.name)}</h3><p class="note">${esc(l.name)} does not have four weeks of history yet, so no model is trained for it. Until then its forecast is a naive one. Pick another grid to see a trained model.</p>`;
+    right.innerHTML = valueBlock(); return;
+  }
+  const gmax = Math.max(c.train_mae, c.val_mae_trees, c.val_mae, c.val_mae_persistence, a ? a.mae_ours : 0);
+  const bands = Object.entries(c.blend).map(([b, w]) => `<tr><td>${b.replace(/^(\d+)-\1$/, "$1")} h ahead</td><td>${num(w.trees * 100)}%</td><td>${num(w.yesterday * 100)}%</td></tr>`).join("");
+  left.innerHTML = `<h3>${esc(f.name)}</h3>
+    <div class="facts">
+      <div class="kv"><span>Predicts</span><span>${esc(f.predicts)}</span></div>
+      <div class="kv"><span>Algorithm</span><span>${esc(f.algorithm)}</span></div>
+      <div class="kv"><span>Inputs</span><span>${esc(f.inputs)} · weather from ${esc(f.weather_source)}</span></div>
+      <div class="kv"><span>Trained on</span><span>${num(c.rows)} examples from ${num(c.hours)} hours of ${esc(l.name)} data · ${c.rounds} boosting rounds</span></div>
+      <div class="kv"><span>Guard against overfitting</span><span>${esc(f.validation)}</span></div>
+    </div>
+    <h3>Does it generalise? Error in gCO₂/kWh</h3>
+    <div class="gen">
+      ${barRow("days it trained on", c.train_mae, gmax, "var(--muted)")}
+      ${barRow("14 held-out days, trees", c.val_mae_trees, gmax, "var(--s1)")}
+      ${barRow("held-out days, after blend", c.val_mae, gmax, "var(--s1)")}
+      ${a ? barRow("live walk-forward test", a.mae_ours, gmax, "var(--s3)") : ""}
+      ${barRow("same as now, held-out", c.val_mae_persistence, gmax, "var(--ink-2)")}
+    </div>
+    <p class="note">Error on days it has seen is lower than on days it has not, as for any model, but the gap is modest and unseen-day error stays below the naive method. A memorising model would show a tiny first bar and a huge second one.</p>`;
+  const dmax = Math.max(...c.drivers.map((x) => x.importance), 1e-9);
+  right.innerHTML = `<h3>What drives it · ${esc(l.name)}</h3>
+    <div class="gen">${c.drivers.map((x) => barRow(x.name, x.importance, dmax, "var(--s3)")).join("")}</div>
+    <p class="note">How much the held-out error rises when that input is scrambled. Bigger means the model leans on it more.</p>
+    <h3 class="gap">How far it trusts itself</h3>
+    <div class="scroll"><table class="mini-t"><tr><th>horizon</th><th>weight on the trees' change</th><th>pull towards yesterday</th></tr>${bands}</table></div>
+    <p class="note">Learned on held-out days. Where the trees do not clearly beat "same as now", the weight drops to zero by itself.</p>
+    ${valueBlock()}`;
+}
+function valueBlock() {
+  const v = (LIVE.accuracy || {}).forecast_value; if (!v) return "";
+  const mx = Math.max(v.naive_g, v.model_g, v.perfect_g), pct = v.naive_g > 0 ? (1 - v.model_g / v.naive_g) * 100 : 0;
+  const tail = v.model_g <= v.perfect_g ? `On this week that matched what perfect foresight achieves with the same rule.`
+    : (v.captured_pct != null ? `That is ${num(v.captured_pct)}% of what perfect foresight would have gained.` : "");
+  return `<h3 class="gap">What the forecast is worth to the scheduler</h3>
+    <div class="gen">
+      ${barRow("naive forecast", v.naive_g / 1000, mx / 1000, "var(--s5)", " kg")}
+      ${barRow("our model", v.model_g / 1000, mx / 1000, "var(--s3)", " kg")}
+      ${barRow("perfect foresight", v.perfect_g / 1000, mx / 1000, "var(--ink-2)", " kg")}
+    </div>
+    <p class="value-line">${pct > 0.5 ? `Same scheduler, same ${v.jobs} jobs, ${v.days} days of real grid data: our forecast cuts emissions by <b>${num(pct, 1)}%</b> against a naive forecast. ${tail}` : `On this week the forecast made no measurable difference to emissions.`}</p>
+    <p class="note">${fmtT(v.from)} to ${fmtT(v.to)} UTC. Each hour used the model that existed at that hour. New jobs stop two days before the end so every variant finishes the same work.</p>`;
 }
 
 /* ------------------------------------------------------------------ scheduler stage + feed */
@@ -224,23 +312,24 @@ function renderFeed() {
 function renderScore() {
   const tw = LIVE.twin, colIdx = Object.fromEntries(tw.series_columns.map((c, i) => [c, i + 1]));
   const labels = tw.series.map((r) => fmtT(r[0]));
-  const ds = POLICY_ORDER.filter((id) => colIdx[id]).map((id) => ({ label: pol(id).label, data: tw.series.map((r) => r[colIdx[id]] / 1000), borderColor: css(POLICY_SLOT[id]), backgroundColor: css(POLICY_SLOT[id]), borderWidth: id === "ours" ? 3 : 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.15 }));
+  const ds = POLICY_ORDER.filter((id) => colIdx[id]).map((id) => ({ label: SHORT[id] || pol(id).label, pid: id, data: tw.series.map((r) => r[colIdx[id]] / 1000), borderColor: css(POLICY_SLOT[id]), backgroundColor: css(POLICY_SLOT[id]), borderWidth: id === "ours" ? 3 : 2, borderDash: id === "ours-naive" ? [5, 4] : [], pointRadius: 0, pointHoverRadius: 4, tension: 0.15 }));
   const base = chartBase();
   base.scales.x.ticks.maxTicksLimit = 6;
   base.layout = { padding: { right: 150 } };
   base.scales.y.title = { display: true, text: "kg CO₂e, cumulative" };
   base.plugins.tooltip.callbacks = { label: (it) => ` ${it.dataset.label}: ${num(it.parsed.y, 2)} kg` };
   const ends = { id: "ends", afterDatasetsDraw(c) {
-    const g = c.ctx, pts = c.data.datasets.map((d, i) => { const m = c.getDatasetMeta(i).data; const p = m[m.length - 1]; return p ? { y: p.y, x: p.x, d } : null; }).filter(Boolean).sort((a, b) => a.y - b.y);
+    const g = c.ctx, pts = c.data.datasets.map((d, i) => { const m = c.getDatasetMeta(i).data; const p = m[m.length - 1]; return (p && d.pid !== "ours-naive") ? { y: p.y, x: p.x, d } : null; }).filter(Boolean).sort((a, b) => a.y - b.y);
     for (let i = 1; i < pts.length; i++) if (pts[i].y - pts[i - 1].y < 15) pts[i].y = pts[i - 1].y + 15;
     g.save(); g.font = `12px ${css("--sans")}`; g.textBaseline = "middle";
-    pts.forEach((p) => { g.fillStyle = p.d.borderColor; g.beginPath(); g.arc(p.x + 8, p.y, 4, 0, 6.3); g.fill(); g.fillStyle = css("--ink"); g.fillText(p.d.label.replace("Payback-aware · ", "").replace("Payback-aware (ours)", "Ours"), p.x + 17, p.y); });
+    pts.forEach((p) => { g.fillStyle = p.d.borderColor; g.beginPath(); g.arc(p.x + 8, p.y, 4, 0, 6.3); g.fill(); g.fillStyle = css("--ink"); g.fillText(p.d.label, p.x + 17, p.y); });
     g.restore(); } };
   mk("score-chart", { type: "line", data: { labels, datasets: ds }, options: base, plugins: [ends] });
-  const head = `<tr><th>policy</th><th>total CO₂e</th><th>from running</th><th>from moving</th><th>moves made</th><th>moves refused</th><th>hours waited</th><th>jobs finished</th><th>finished late</th></tr>`;
-  $("#score-table").innerHTML = head + TABLE_ORDER.map((id) => { const p = pol(id); return p ? `<tr><td><i style="background:var(${POLICY_SLOT[id]})"></i>${esc(p.label)}${p.solver_fallbacks ? ` <span class="warn" title="The optimiser could not run for ${p.solver_fallbacks} hours; the greedy rule decided instead">· solver fell back ${p.solver_fallbacks}×</span>` : ""}</td><td>${fmtG(p.total_g)}</td><td>${fmtG(p.exec_g)}</td><td>${fmtG(p.migration_g)}</td><td>${p.migrations}</td><td>${p.refuses}</td><td>${p.waits}</td><td>${p.done}</td><td>${p.deadline_missed}</td></tr>` : ""; }).join("");
+  $("#score-legend").innerHTML = POLICY_ORDER.filter((id) => colIdx[id]).map((id) => `<span><i ${id === "ours-naive" ? `class="dash" style="color:var(${POLICY_SLOT[id]})"` : `style="background:var(${POLICY_SLOT[id]})"`}></i>${esc(SHORT[id])}</span>`).join("");
+  const head = `<tr><th>policy</th><th>total CO₂e</th><th>from running</th><th>from moving</th><th>moves made</th><th>moves refused</th><th>hours waited</th><th>job-hours run</th><th>jobs finished</th><th>finished late</th></tr>`;
+  $("#score-table").innerHTML = head + TABLE_ORDER.map((id) => { const p = pol(id); return p ? `<tr><td><i style="background:var(${POLICY_SLOT[id]})"></i>${esc(p.label)}${p.solver_fallbacks ? ` <span class="warn" title="The optimiser could not run for ${p.solver_fallbacks} hours; the greedy rule decided instead">· solver fell back ${p.solver_fallbacks}×</span>` : ""}</td><td>${fmtG(p.total_g)}</td><td>${fmtG(p.exec_g)}</td><td>${fmtG(p.migration_g)}</td><td>${p.migrations}</td><td>${p.refuses}</td><td>${p.waits}</td><td>${num(p.job_hours)}</td><td>${p.done}</td><td>${p.deadline_missed}</td></tr>` : ""; }).join("");
   $("#score-sub").textContent = `Cumulative emissions of the same ${tw.jobs_created} jobs under each policy, since ${fmtT(tw.epoch)} UTC.`;
-  $("#score-note").textContent = `Running = electricity used by the jobs. Moving = checkpoint, transfer and restore. Late = finished after its deadline. The first ${LIVE.meta.notes.replayed_hours} hours were replayed from recorded grid data when the dashboard launched.`;
+  $("#score-note").textContent = `"Naive forecast" is our same rule fed "same as now" instead of the trained model, so the gap between those two lines is the model's contribution. Running = electricity used by the jobs. Moving = checkpoint, transfer and restore. Late = finished after its deadline. The first ${LIVE.meta.notes.replayed_hours} hours were replayed from recorded grid data when the dashboard launched.`;
 }
 
 /* ------------------------------------------------------------------ payback calculator */
@@ -279,7 +368,8 @@ function renderAbout() {
   const n = LIVE.meta.notes, seen = new Set(), real = [];
   LIVE.locations.forEach((l) => { if (l.history && !seen.has(l.operator)) { seen.add(l.operator); const names = LIVE.locations.filter((x) => x.operator === l.operator && x.history).map((x) => x.name).join(", "); real.push(`Grid carbon intensity for ${esc(names)} from <a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.operator)}</a>`); } });
   const hrs = Math.max(...withData().map((l) => l.hours_of_history || 0));
-  real.push(`Forecasts: retrained on up to ${num(hrs)} hours of that history, scored daily against what the grid then did`);
+  real.push(`Weather forecasts for each grid from <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>, as issued a day ahead`);
+  real.push(`The forecaster: trained here on up to ${num(hrs)} hours of that history per grid, retrained every run, scored daily on days it has not seen`);
   real.push("Every decision: computed by the same engine the simulator and the Kubernetes controller use");
   real.push("Emission totals: each policy is charged for running and for moving, whether or not it counted the cost");
   $("#real-list").innerHTML = real.map((x) => `<li>${x}</li>`).join("");

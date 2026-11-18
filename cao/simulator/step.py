@@ -17,6 +17,7 @@ class SlotOutcome:
     migrations: int = 0
     sla_slots: int = 0
     cap_rej: int = 0
+    work_h: float = 0.0
     counts: Dict[ActionType, int] = field(default_factory=lambda: {a: 0 for a in ActionType})
     applied: Dict[str, str] = field(default_factory=dict)
     log: List[dict] = field(default_factory=list)
@@ -99,6 +100,7 @@ def step_slot(
         j.exec_carbon_g += c
         out.exec_g += c
         j.progress_h += eff
+        out.work_h += eff
         out.load[j.region] = out.load.get(j.region, 0.0) + j.cpu
         if j.sla_rtt_ms is not None and j.user_region is not None and latency_ms is not None:
             if rtt_ms(latency_ms, j.user_region, j.region) > j.sla_rtt_ms:

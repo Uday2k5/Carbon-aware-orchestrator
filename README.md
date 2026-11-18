@@ -46,12 +46,15 @@ then follow **For teammates** below.
 
 1. **Collect** live carbon intensity for six locations: North West England, London, South Wales
    (National Grid ESO), Denmark West (Energinet), France (RTE), India North (Electricity Maps, needs a key).
-2. **Forecast** the next 24 h per grid. Candidates (boosted trees, seasonal, persistence, blend) are
-   re-scored every day on the last two weeks, out of sample; the best one serves today's forecast.
+2. **Forecast** the next 24 h per grid with a model trained here: regularised boosted trees on
+   day-ahead weather forecasts (Open-Meteo) plus history, blended with naive forecasts per horizon.
+   Retrained every run, scored daily on unseen days. Details and study: [docs/07-forecaster.md](docs/07-forecaster.md).
 3. **Schedule** a rolling set of simulated jobs with the real engine: MOVE / WAIT / HOLD / REFUSE.
-4. **Score** four policies on the same jobs: ours, ours with the 24 h MILP plan, always-greenest, carbon-unaware.
-5. **Publish** `site/data/live.json` plus the dashboard in `web/` (grid cards, forecast vs actual,
-   job placement, decision feed, scoreboard, payback calculator, what-is-real list).
+4. **Score** five policies on the same jobs: ours, ours with the 24 h MILP plan, ours fed a naive
+   forecast (the gap to "ours" is the model's contribution), always-greenest, carbon-unaware.
+5. **Publish** `site/data/live.json` plus the dashboard in `web/` (grid cards, forecast with its
+   "why", model card with generalisation check and drivers, job placement, decision feed, scoreboard,
+   payback calculator, what-is-real list).
 
 Grid data, forecasts and decisions are real. The jobs are simulated and the migration cost constants
 are placeholders until the profiler runs on the testbed; the dashboard says so in its Method section.
@@ -59,7 +62,7 @@ are placeholders until the profiler runs on the testbed; the dashboard says so i
 **Run it on any machine (macOS, Linux, Windows)**
 
 ```bash
-cao live tick          # first run ~2-3 min (60 days of history, model training, 72 h replay); later runs ~15 s
+cao live tick          # first run of a day ~4-5 min (90 days of history, model training + scoring); later runs ~25 s
 cao live serve         # then open http://localhost:8080
 ```
 
@@ -71,7 +74,7 @@ machine, `git push`; on the other machine `git pull`. The hosted dashboard updat
 1. Repo -> Settings -> General -> Change visibility -> Public (free Pages needs a public repo; GitHub Pro allows private).
 2. `git push`. The *Live dashboard* workflow runs and creates the `gh-pages` branch (Actions tab shows it).
 3. Repo -> Settings -> Pages -> Source: *Deploy from a branch* -> `gh-pages` / `(root)` -> Save.
-4. Open https://uday2k5.github.io/Carbon-aware-orchestrator/ . It refreshes every hour (GitHub may delay
+4. Open https://uday2k5.github.io/Carbon-aware-orchestrator/ . It refreshes up to three times an hour (GitHub may delay
    scheduled runs by a few minutes). Actions tab -> *Live dashboard* -> *Run workflow* forces a run.
 
 **Switch India on**
@@ -127,7 +130,7 @@ If PowerShell refuses to activate (`running scripts is disabled`), run once:
 | step | expected |
 | --- | --- |
 | `pip install -e ".[dev,viz]"` | ends with `Successfully installed ... carbon-aware-orchestrator-0.1.0` |
-| `pytest` | `47 passed` in roughly a minute (CBC solver runs inside the tests) |
+| `pytest` | `51 passed` in roughly a minute (CBC solver runs inside the tests) |
 | `python experiments/exp01_payback_boundary.py` | `Job A ... -> MOVE`, `Job B ... -> REFUSE`, a payback table, a `M`/`R` grid, first line says `cost model: placeholder` |
 | `python experiments/exp05_replay.py` | a 7-row policy table, then `replay json -> ... replay html -> ... replay gif -> ...` (≈1 min) |
 | `results/replay.html` in a browser | header `hour 0 / 71`, five coloured region columns, dots; press ▶ play and dots move (checklist in *Try it in 3 minutes*) |
@@ -175,6 +178,7 @@ python experiments/exp02_policy_comparison.py      # 6 baselines vs proposed vs 
 python experiments/exp03_forecast_sensitivity.py   # regret vs forecast error
 python experiments/exp04_network_energy_sensitivity.py
 python experiments/exp05_replay.py                 # visual replay: results/replay.html + replay.gif
+python experiments/exp06_forecaster_study.py       # forecaster vs naive, over/under-fit check (after `cao live tick`)
 ```
 
 ## Visual replay (for demos / viva)
@@ -310,6 +314,7 @@ Shared contract: `cao.core.models.Job` / `Decision`, `MigrationCostModel`, the C
 - [docs/04-day1-install.md](docs/04-day1-install.md) — per-member install lists (Windows 11)
 - [docs/05-week-plan.md](docs/05-week-plan.md) — 12-week plan for 3 students
 - [docs/06-database-schema.md](docs/06-database-schema.md) — sqlite tables
+- [docs/07-forecaster.md](docs/07-forecaster.md) — the trained carbon forecaster: design, study, over/under-fit check, limits
 
 ## Scope (deliberately reduced)
 
