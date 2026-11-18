@@ -83,12 +83,18 @@ machine, `git push`; on the other machine `git pull`. The hosted dashboard updat
 
 **Switch India on**
 
-Create a free key at https://www.electricitymaps.com/ (zone `IN-NO`), then:
+Get an Electricity Maps API key for zone `IN-NO` (India North). Free access is no longer open to
+everyone: ask for it as a student / academic project at https://www.electricitymaps.com/get-started
+("Free Access"), or use their trial token. The free key covers one zone and the last 24 hours. Then:
 
 - hosted: Repo -> Settings -> Secrets and variables -> Actions -> New repository secret, name `ELECTRICITY_MAPS_TOKEN`.
 - local: put `ELECTRICITY_MAPS_TOKEN=...` in a `.env` file in the repo root (git-ignored).
 
-India appears on the next run and starts collecting; its forecast switches on after ten days of history.
+India appears on the next run and starts collecting (the key only gives the last 24 hours, so its
+history builds up run by run). Forecast: "same as now" for the first two days, "same hour
+yesterday" after that, the trained weather model once four weeks have been collected.
+Check the key first: `curl -s -H "auth-token: $ELECTRICITY_MAPS_TOKEN" "https://api.electricitymap.org/v3/carbon-intensity/latest?zone=IN-NO"`.
+If the reply says it is sandbox or test data, do not switch India on: the dashboard shows real data only.
 
 Settings live in `config/live.yaml` (locations, latency table, services, job arrival rate).
 
