@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Carbon Payback Live</title>
+<meta name="description" content="Live grid carbon intensity, day-ahead forecasts and a scheduler that moves workloads only when the move pays back its own carbon.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f5c46'/%3E%3Cpath d='M9 20a7 7 0 0 1 13-3' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round'/%3E%3Cpath d='M22 11v6h-6' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#top" aria-label="Carbon Payback Live">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M9 20a7 7 0 0 1 13-3"/><path d="M22 11v6h-6"/></svg>
+    <span>Carbon Payback <b>Live</b></span>
+  </a>
+  <nav class="bar-nav" aria-label="Sections">
+    <a href="#grid">Grid</a><a href="#forecast">Forecast</a><a href="#model">Model</a><a href="#events">Events</a><a href="#scheduler">Scheduler</a><a href="#score">Scoreboard</a><a href="#calc">Calculator</a><a href="#about">Method</a>
+  </nav>
+  <div class="bar-right">
+    <span class="pill" id="status" title="When the grid data was last refreshed"><i class="dot"></i><span id="status-text">loading…</span><span id="status-short"></span></span>
+    <button class="icon-btn" id="theme" type="button" aria-label="Switch colour theme" title="Switch colour theme">◐</button>
+    <a class="icon-btn" id="repo" href="https://github.com/Uday2k5/Carbon-aware-orchestrator" target="_blank" rel="noopener" title="Source code on GitHub">⌥</a>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Carbon-aware workload orchestrator</p>
+      <h1>Move a workload only when the move <em>pays back</em> its own carbon.</h1>
+      <p class="lede">Real grid carbon intensity from national operators, a day-ahead forecast per grid, and a scheduler that answers one question every hour for every job: move, wait, hold, or refuse.</p>
+    </div>
+    <div class="hero-stats" id="hero-stats" aria-live="polite"></div>
+  </section>
+
+  <section id="grid" class="sec">
+    <div class="sec-head"><h2>The grid right now</h2><p>Carbon intensity of electricity, grams of CO₂ per kWh. Pick a grid to see its forecast.</p></div>
+    <div class="locs" id="locs"></div>
+  </section>
+
+  <section id="forecast" class="sec">
+    <div class="sec-head"><h2>Day-ahead forecast</h2><p id="fc-sub">Last 72 hours and the next 24.</p></div>
+    <div class="two">
+      <div class="panel"><div class="chart tall"><canvas id="fc-chart" aria-label="History and forecast of carbon intensity"></canvas></div><div class="legend" id="fc-legend"></div><div class="why" id="why"></div></div>
+      <div class="panel" id="acc"></div>
+    </div>
+  </section>
+
+  <section id="model" class="sec">
+    <div class="sec-head"><h2>The model behind the forecast</h2><p id="model-sub">Trained by this project, retrained every day on the data it collects.</p></div>
+    <div class="two">
+      <div class="panel" id="model-card"></div>
+      <div class="panel" id="model-side"></div>
+    </div>
+  </section>
+
+  <section id="events" class="sec">
+    <div class="sec-head"><h2>Unusual grid behaviour</h2><p id="events-sub">Hours when a grid landed far from where the model expected it.</p></div>
+    <div class="two">
+      <div class="panel"><h3>Events in the last 7 days</h3><ul class="feed" id="event-list"></ul></div>
+      <div class="panel" id="event-side"></div>
+    </div>
+  </section>
+
+  <section id="scheduler" class="sec">
+    <div class="sec-head"><h2>Scheduler, hour by hour</h2><p>Simulated jobs on the live grid. Each dot is a job where our policy has placed it.</p></div>
+    <div class="two wide-left">
+      <div class="panel"><svg id="stage" viewBox="0 0 1000 430" role="img" aria-label="Jobs placed across grid regions"></svg><div class="legend" id="stage-legend"></div></div>
+      <div class="panel feed-panel"><h3>Latest decisions</h3><ul class="feed" id="feed"></ul></div>
+    </div>
+  </section>
+
+  <section id="score" class="sec">
+    <div class="sec-head"><h2>Scoreboard</h2><p id="score-sub">Cumulative emissions of the same jobs under each policy.</p></div>
+    <div class="stack">
+      <div class="panel"><div class="chart tall"><canvas id="score-chart" aria-label="Cumulative emissions per policy"></canvas></div><div class="legend" id="score-legend"></div></div>
+      <div class="panel"><div class="scroll"><table class="tbl" id="score-table"></table></div><p class="note" id="score-note"></p></div>
+    </div>
+  </section>
+
+  <section id="calc" class="sec">
+    <div class="sec-head"><h2>Payback calculator</h2><p>Try a job against the live grid. The same rule the scheduler uses.</p></div>
+    <div class="two">
+      <form class="panel calc" id="calc-form" onsubmit="return false">
+        <label for="c-from">Running in<select id="c-from"></select></label>
+        <label for="c-to">Candidate grid<select id="c-to"></select></label>
+        <label for="c-state">State to move <output id="o-state"></output><input id="c-state" type="range" min="-1" max="2.3" step="0.01" value="0.7"></label>
+        <label for="c-left">Runtime left <output id="o-left"></output><input id="c-left" type="range" min="0.25" max="24" step="0.25" value="2"></label>
+        <label for="c-power">Job power <output id="o-power"></output><input id="c-power" type="range" min="0.05" max="1" step="0.05" value="0.2"></label>
+      </form>
+      <div class="panel verdict" id="verdict" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <section id="about" class="sec">
+    <div class="sec-head"><h2>Method, and what is real</h2></div>
+    <div class="three">
+      <div class="panel"><h3>Real</h3><ul class="plain" id="real-list"></ul></div>
+      <div class="panel"><h3>Simulated or assumed</h3><ul class="plain" id="sim-list"></ul></div>
+      <div class="panel"><h3>The rule</h3>
+        <p class="formula">payback (h) = migration carbon ÷ ( P × (CI<sub>here</sub> − CI<sub>there</sub>) )</p>
+        <p>MOVE only if the job's remaining runtime is longer than the payback. Otherwise REFUSE, even when a greener grid exists.</p>
+        <p class="note" id="about-meta"></p>
+      </div>
+    </div>
+  </section>
+</main>
+<footer class="foot"><span id="foot-text"></span></footer>
+<div class="tip" id="tip" hidden></div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
